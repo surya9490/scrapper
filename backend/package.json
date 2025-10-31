@@ -1,0 +1,50 @@
+{
+  "name": "ai-product-price-mapping-backend",
+  "version": "1.0.0",
+  "description": "Backend service for AI-powered product and price mapping tool",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "dev:nodemon": "nodemon server.js",
+    "worker": " node scraper/worker.js",
+    "worker:dev": "nodemon scraper/worker.js",
+    "db:migrate": "npx prisma migrate dev",
+    "db:generate": "npx prisma generate",
+    "db:deploy": "npx prisma migrate deploy"
+  },
+  "keywords": [
+    "scraping",
+    "playwright",
+    "express",
+    "prisma",
+    "redis",
+    "bullmq"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^6.18.0",
+    "@shopify/shopify-api": "^8.1.1",
+    "axios": "^1.6.2",
+    "bullmq": "^4.15.4",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.0.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "openai": "^4.20.1",
+    "playwright": "^1.40.1",
+    "playwright-cluster": "^1.0.7",
+    "sharp": "^0.33.0",
+    "string-similarity": "^4.0.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "prisma": "^6.18.0"
+  }
+}

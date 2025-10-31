@@ -1,0 +1,31 @@
+# Use Playwright base image (includes browsers)
+FROM mcr.microsoft.com/playwright:v1.56.1-jammy
+
+# Switch to root for package installation
+USER root
+
+WORKDIR /app
+
+# Copy package files first
+COPY package*.json ./
+
+# Install ALL dependencies (including dev dependencies)
+RUN npm install && npm cache clean --force
+
+# Copy rest of the project files
+COPY . .
+
+# Generate Prisma client (ignore error if schema not found yet)
+RUN npx prisma generate || true
+
+# Change ownership of the app directory for the Playwright user
+RUN chown -R pwuser:pwuser /app
+
+# Expose backend port and debug port
+EXPOSE 4000 9229
+
+# Switch back to non-root user
+USER pwuser
+
+# Default command (can be overridden in docker-compose)
+CMD ["npm", "run", "dev:nodemon"]

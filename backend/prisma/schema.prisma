@@ -1,0 +1,237 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User's uploaded products (SKUs)
+model UserProduct {
+  id          Int      @id @default(autoincrement())
+  sku         String?  @unique
+  title       String
+  description String?
+  brand       String?
+  category    String?
+  
+  // Extracted attributes
+  threadCount String?
+  material    String?
+  size        String?
+  design      String?
+  color       String?
+  
+  // Shopify integration
+  shopifyProductId String?
+  shopifyVariantId String?
+  currentPrice     Float?
+  
+  // AI embeddings for matching
+  titleEmbedding String? // JSON string of embedding vector
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  productMappings ProductMapping[]
+  priceHistories  PriceHistory[]
+  
+  @@map("user_products")
+}
+
+// Competitor products discovered through scraping
+model CompetitorProduct {
+  id          Int      @id @default(autoincrement())
+  title       String
+  url         String   @unique
+  price       Float?
+  image       String?
+  brand       String?
+  category    String?
+  
+  // Extracted attributes
+  threadCount String?
+  material    String?
+  size        String?
+  design      String?
+  color       String?
+  
+  // Competitor info
+  competitorDomain String
+  competitorName   String?
+  
+  // AI embeddings for matching
+  titleEmbedding String? // JSON string of embedding vector
+  imageEmbedding String? // JSON string of embedding vector
+  
+  // Scraping metadata
+  lastScrapedAt DateTime?
+  scrapingStatus String @default("active") // active, inactive, failed
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  productMappings ProductMapping[]
+  priceHistories  PriceHistory[]
+  
+  @@map("competitor_products")
+}
+
+// Product mappings between user products and competitor products
+model ProductMapping {
+  id                   Int      @id @default(autoincrement())
+  userProductId        Int
+  competitorProductId  Int
+  
+  // Matching confidence and algorithm details
+  matchingScore        Float    // 0.0 to 1.0
+  matchingAlgorithm    String   // "title_similarity", "attribute_match", "image_similarity"
+  matchingDetails      String?  // JSON string with detailed matching info
+  
+  // Manual review status
+  status               String   @default("pending") // pending, approved, rejected
+  reviewedBy           String?  // User who reviewed
+  reviewedAt           DateTime?
+  reviewNotes          String?
+  
+  // Monitoring settings
+  priceMonitoringEnabled Boolean @default(false)
+  monitoringFrequency    String? // "hourly", "daily", "weekly"
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  userProduct      UserProduct      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  competitorProduct CompetitorProduct @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
+  
+  @@unique([userProductId, competitorProductId])
+  @@map("product_mappings")
+}
+
+// Price history for both user and competitor products
+model PriceHistory {
+  id                   Int      @id @default(autoincrement())
+  userProductId        Int?
+  competitorProductId  Int?
+  
+  price                Float
+  currency             String   @default("USD")
+  
+  // Price change metadata
+  previousPrice        Float?
+  priceChange          Float?   // Calculated difference
+  priceChangePercent   Float?   // Percentage change
+  
+  // Source information
+  source               String   // "scraping", "shopify_sync", "manual"
+  sourceUrl            String?
+  
+  recordedAt DateTime @default(now())
+  
+  // Relations
+  userProduct      UserProduct?      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
+  
+  @@map("price_histories")
+}
+
+// Shopify Session model for OAuth and user management
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  
+  @@map("sessions")
+}
+
+// Shopify store configuration
+model ShopifyStore {
+  id          Int      @id @default(autoincrement())
+  shopDomain  String   @unique
+  accessToken String
+  
+  // Store metadata
+  storeName   String?
+  storeEmail  String?
+  currency    String   @default("USD")
+  timezone    String?
+  
+  // Integration settings
+  autoSyncPrices      Boolean @default(false)
+  syncFrequency       String? // "hourly", "daily", "weekly"
+  priceUpdateStrategy String? // "manual", "auto_approve", "auto_with_limits"
+  
+  // Webhooks
+  webhookUrl String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("shopify_stores")
+}
+
+// Job queue for background tasks
+model JobQueue {
+  id          Int      @id @default(autoincrement())
+  jobType     String   // "scraping", "price_monitoring", "product_matching", "shopify_sync"
+  jobData     String   // JSON string with job parameters
+  status      String   @default("pending") // pending, processing, completed, failed
+  
+  // Job metadata
+  priority    Int      @default(0)
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(3)
+  
+  // Timing
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  
+  // Results
+  result      String?  // JSON string with job results
+  error       String?  // Error message if failed
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("job_queue")
+}
+
+// CSV upload batches
+model UploadBatch {
+  id            Int      @id @default(autoincrement())
+  filename      String
+  totalRows     Int
+  processedRows Int      @default(0)
+  successRows   Int      @default(0)
+  errorRows     Int      @default(0)
+  
+  status        String   @default("processing") // processing, completed, failed
+  errors        String?  // JSON string with error details
+  
+  uploadedBy    String?  // User identifier
+  uploadedAt    DateTime @default(now())
+  completedAt   DateTime?
+  
+  @@map("upload_batches")
+}

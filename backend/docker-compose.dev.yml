@@ -1,0 +1,137 @@
+
+version: '3.8'
+
+services:
+  # Backend API service
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: npm run dev:nodemon
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/productdb
+    ports:
+      - "4001:4001"
+      - "9229:9229" # Debug port
+    depends_on:
+      - db
+      - redis
+    networks:
+      - dev_network
+
+  # Worker service
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: npm run worker:dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/productdb
+    depends_on:
+      - backend
+      - redis
+      - db
+    networks:
+      - dev_network
+
+  # PostgreSQL database for development
+  db:
+    image: postgres:15-alpine
+    container_name: dev_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-productdb}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - dev_pgdata:/var/lib/postgresql/data
+    networks:
+      - dev_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-productdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for job queue in development
+  redis:
+    image: redis:7-alpine
+    container_name: dev_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - dev_redis_data:/data
+    networks:
+      - dev_network
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Commander (UI to view Redis data)
+  redis-commander:
+    platform: linux/amd64
+    image: rediscommander/redis-commander:latest
+    container_name: dev_redis_commander
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - dev_network
+
+  # pgAdmin for PostgreSQL management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: dev_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+    volumes:
+      - dev_pgadmin_data:/var/lib/pgadmin
+    networks:
+      - dev_network
+
+# Volumes
+volumes:
+  dev_pgdata:
+    driver: local
+  dev_redis_data:
+    driver: local
+  dev_pgadmin_data:
+    driver: local
+
+# Network
+networks:
+  dev_network:
+    driver: bridge

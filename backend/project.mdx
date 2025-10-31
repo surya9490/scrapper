@@ -1,0 +1,431 @@
+---
+title: "Backend Setup Guide – AI Product & Price Mapping Tool"
+description: "Complete backend setup for Node.js + Playwright + PostgreSQL + Redis + Docker"
+---
+
+# 🧱 Backend Setup Guide
+
+## Overview
+
+This document explains how to set up the backend for the **AI-Powered Product & Price Mapping Tool**.
+
+The backend stack includes:
+
+- **Node.js + Express** — REST API
+- **Playwright + Cheerio** — Web scraping
+- **Prisma + PostgreSQL** — Database ORM & storage
+- **BullMQ + Redis** — Queue system for background jobs
+- **node-cron** — Scheduled jobs
+- **Docker** — Containerized environment with Redis, PostgreSQL, and Playwright preinstalled
+
+---
+
+## ⚙️ Architecture Overview
+
+Remix (Shopify Embedded App)
+↓ REST API
+Node.js Backend (Express)
+├── /api/scrape → Scrapes competitor URLs
+├── /api/queue → Adds URLs to queue
+├── /jobs/priceChecker → Runs scheduled rechecks
+└── /scraper/worker → Processes scrape queue
+↓
+PostgreSQL (Prisma)
+Redis (BullMQ Queue)
+Playwright (Clustered Browsers)
+
+yaml
+Copy code
+
+---
+
+## 📁 Folder Structure
+
+product-mapping-backend/
+├── server.js
+├── package.json
+├── prisma/
+│ └── schema.prisma
+├── .env
+├── .env.example
+├── .dockerignore
+├── Dockerfile
+├── docker-compose.yml
+├── /routes/
+│ ├── scrape.js
+│ ├── queue.js
+├── /scraper/
+│ ├── cluster.js
+│ ├── worker.js
+├── /jobs/
+│ └── priceChecker.js
+└── /db/
+└── prisma/schema.prisma
+
+yaml
+Copy code
+
+---
+
+## 🪜 Step 1 – Initialize Project
+
+```bash
+mkdir product-mapping-backend && cd product-mapping-backend
+npm init -y
+npm install express cors dotenv node-cron bullmq ioredis playwright cheerio
+npm install prisma @prisma/client
+npx prisma init
+🧩 Step 2 – Prisma Schema
+prisma/schema.prisma
+
+prisma
+Copy code
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Product {
+  id            Int      @id @default(autoincrement())
+  title         String
+  url           String   @unique
+  price         Float?
+  image         String?
+  lastScrapedAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+Run migration:
+
+bash
+Copy code
+npx prisma migrate dev --name init
+⚙️ Step 3 – Express Server
+server.js
+
+js
+Copy code
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import scrapeRouter from "./routes/scrape.js";
+import queueRouter from "./routes/queue.js";
+import { schedulePriceJob } from "./jobs/priceChecker.js";
+
+dotenv.config();
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/scrape", scrapeRouter);
+app.use("/api/queue", queueRouter);
+
+schedulePriceJob();
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+🧰 Step 4 – Routes
+/routes/scrape.js
+js
+Copy code
+import express from "express";
+import cheerio from "cheerio";
+import { getCluster } from "../scraper/cluster.js";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+const router = express.Router();
+
+router.post("/", async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "Missing URL" });
+
+  const cluster = await getCluster();
+  let productData;
+
+  await cluster.task(async ({ page }) => {
+    await page.goto(url, { waitUntil: "networkidle" });
+    const html = await page.content();
+    const $ = cheerio.load(html);
+
+    const title = $("h1").first().text().trim();
+    const priceText = $('[class*="price"]').first().text().replace(/[₹$,]/g, "");
+    const price = parseFloat(priceText) || null;
+    const image = $("img").first().attr("src");
+
+    productData = { title, price, image };
+  });
+
+  await prisma.product.upsert({
+    where: { url },
+    update: { ...productData, lastScrapedAt: new Date() },
+    create: { url, ...productData, lastScrapedAt: new Date() },
+  });
+
+  res.json({ message: "Scraped successfully", data: productData });
+});
+
+export default router;
+/routes/queue.js
+js
+Copy code
+import express from "express";
+import { Queue } from "bullmq";
+import IORedis from "ioredis";
+
+const router = express.Router();
+const connection = new IORedis(process.env.REDIS_URL);
+const scrapeQueue = new Queue("scrape-jobs", { connection });
+
+router.post("/", async (req, res) => {
+  const { urls } = req.body;
+  if (!urls) return res.status(400).json({ error: "Missing URLs" });
+
+  for (const url of urls) await scrapeQueue.add("scrape-job", { url });
+  res.json({ message: `${urls.length} jobs added to queue` });
+});
+
+export default router;
+export { scrapeQueue };
+🧱 Step 5 – Scraper Cluster & Worker
+/scraper/cluster.js
+js
+Copy code
+import { Cluster } from "playwright-cluster";
+
+let cluster;
+export async function getCluster() {
+  if (!cluster) {
+    cluster = await Cluster.launch({
+      concurrency: Cluster.CONCURRENCY_PAGE,
+      maxConcurrency: 5,
+      timeout: 60000,
+      playwrightOptions: { headless: true },
+    });
+    console.log("🧭 Playwright Cluster started");
+  }
+  return cluster;
+}
+/scraper/worker.js
+js
+Copy code
+import { Worker } from "bullmq";
+import IORedis from "ioredis";
+import cheerio from "cheerio";
+import { getCluster } from "./cluster.js";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+const connection = new IORedis(process.env.REDIS_URL);
+const cluster = await getCluster();
+
+new Worker(
+  "scrape-jobs",
+  async (job) => {
+    const { url } = job.data;
+    await cluster.task(async ({ page }) => {
+      await page.goto(url, { waitUntil: "networkidle" });
+      const html = await page.content();
+      const $ = cheerio.load(html);
+
+      const title = $("h1").first().text().trim();
+      const priceText = $('[class*="price"]').first().text().replace(/[₹$,]/g, "");
+      const price = parseFloat(priceText) || null;
+      const image = $("img").first().attr("src");
+
+      await prisma.product.upsert({
+        where: { url },
+        update: { title, price, image, lastScrapedAt: new Date() },
+        create: { url, title, price, image, lastScrapedAt: new Date() },
+      });
+      console.log(`✅ Scraped: ${title}`);
+    });
+  },
+  { connection }
+);
+🕒 Step 6 – Cron Job
+/jobs/priceChecker.js
+
+js
+Copy code
+import cron from "node-cron";
+import { PrismaClient } from "@prisma/client";
+import { scrapeQueue } from "../routes/queue.js";
+
+const prisma = new PrismaClient();
+
+export function schedulePriceJob() {
+  cron.schedule("0 */6 * * *", async () => {
+    console.log("Running price recheck...");
+    const products = await prisma.product.findMany();
+    for (const p of products) await scrapeQueue.add("scrape-job", { url: p.url });
+    console.log(`Requeued ${products.length} products.`);
+  });
+}
+🐳 Step 7 – Docker Setup
+Dockerfile
+dockerfile
+Copy code
+FROM mcr.microsoft.com/playwright:latest
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npx prisma generate || true
+EXPOSE 4000
+CMD ["node", "server.js"]
+docker-compose.yml
+yaml
+Copy code
+version: "3.8"
+
+services:
+  backend:
+    build: .
+    container_name: pm_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "4000:4000"
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - .:/app
+    networks:
+      - pm_network
+    command: sh -c "npx prisma migrate deploy && node server.js"
+
+  worker:
+    build: .
+    container_name: pm_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - backend
+      - redis
+      - db
+    volumes:
+      - .:/app
+    networks:
+      - pm_network
+    command: node scraper/worker.js
+
+  db:
+    image: postgres:15
+    container_name: pm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: productdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - pm_network
+
+  redis:
+    image: redis:7
+    container_name: pm_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - pm_network
+
+volumes:
+  pgdata:
+
+networks:
+  pm_network:
+    driver: bridge
+.env.example
+env
+Copy code
+PORT=4000
+NODE_ENV=development
+DATABASE_URL="postgresql://postgres:postgres@db:5432/productdb"
+REDIS_URL="redis://redis:6379"
+.dockerignore
+text
+Copy code
+node_modules
+npm-debug.log
+.env
+.DS_Store
+dist
+.vscode
+.idea
+🧪 Step 8 – Run Locally with Docker
+bash
+Copy code
+# 1. Copy example env file
+cp .env.example .env
+
+# 2. Build images
+docker compose build
+
+# 3. Start all services
+docker compose up -d
+
+# 4. Verify
+docker compose ps
+
+# 5. Run migrations
+docker compose exec backend npx prisma migrate deploy
+
+# 6. Check logs
+docker logs -f pm_backend
+docker logs -f pm_worker
+✅ Step 9 – Test API
+Scrape a single product:
+
+bash
+Copy code
+curl -X POST http://localhost:4000/api/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.example.com/product"}'
+Queue multiple products:
+
+bash
+Copy code
+curl -X POST http://localhost:4000/api/queue \
+  -H "Content-Type: application/json" \
+  -d '{"urls":["https://example.com/p1","https://example.com/p2"]}'
+💡 Step 10 – Common Commands
+Task	Command
+Restart all containers	docker compose restart
+View logs	docker compose logs -f backend
+Enter backend shell	docker exec -it pm_backend /bin/bash
+Stop stack	docker compose down
+Remove volumes (clear DB)	docker compose down -v
+
+🧭 Next Steps
+After backend works:
+
+Add AI Matching (OpenAI + Pinecone).
+
+Build Remix frontend with Shopify OAuth.
+
+Integrate backend APIs with the Remix dashboard.
+
+Deploy to Render / Railway / AWS ECS.
+
+🏁 Summary
+Component	Stack
+API	Express
+Scraper	Playwright + Cheerio
+Database	PostgreSQL + Prisma
+Queue	Redis + BullMQ
+Scheduler	node-cron
+Containerization	Docker Compose
+Scalability
