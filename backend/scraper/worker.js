@@ -5,6 +5,11 @@ import { getCluster } from "./cluster.js";
 import prisma from "../utils/prisma.js";
 import dotenv from "dotenv";
 import logger from "../utils/logger.js";
+import DomainThrottler from "../utils/domainThrottler.js";
+import CircuitBreaker from "../utils/circuitBreaker.js";
+import RetryHandler from "../utils/retryHandler.js";
+import CacheService from "../utils/cacheService.js";
+import ProxyRotation from "../utils/proxyRotation.js";
 
 dotenv.config();
 
@@ -14,7 +19,14 @@ const connection = getRedisClient();
 // Initialize cluster
 const cluster = await getCluster();
 
-logger.info("Starting scrape worker");
+// Initialize optimization utilities
+const domainThrottler = new DomainThrottler();
+const circuitBreaker = new CircuitBreaker();
+const retryHandler = new RetryHandler();
+const cacheService = new CacheService();
+const proxyRotation = new ProxyRotation();
+
+logger.info("Starting optimized scrape worker with all utilities");
 
 // Create worker with proper timeout configuration
 const worker = new Worker(
@@ -22,38 +34,62 @@ const worker = new Worker(
   async (job) => {
     const { url } = job.data;
     const startTime = Date.now();
+    const domain = new URL(url).hostname;
     
     logger.info(`Processing job ${job.id}: ${url}`, {
       jobId: job.id,
       url,
+      domain,
       type: 'job_start'
     });
     
     try {
+      // Check cache first
+      const cacheKey = cacheService.generateKey('product', url);
+      const cachedProduct = await cacheService.get(cacheKey);
+      
+      if (cachedProduct) {
+        logger.info(`Cache hit for job ${job.id}`, { jobId: job.id, url });
+        await job.updateProgress(100);
+        return cachedProduct;
+      }
+
+      // Check circuit breaker for domain
+      if (!circuitBreaker.canExecute(domain)) {
+        throw new Error(`Circuit breaker is open for domain: ${domain}`);
+      }
+
+      // Apply domain throttling
+      await domainThrottler.throttle(domain);
+      
       // Update job progress
       await job.updateProgress(10);
       
       let productData;
       
-      // Execute scraping with cluster with timeout handling
-      logger.info(`Starting scrape for: ${url}`, {
-        jobId: job.id,
-        type: 'scrape_start'
+      // Execute scraping with retry handler and all optimizations
+      productData = await retryHandler.execute(async () => {
+        logger.info(`Starting scrape for: ${url}`, {
+          jobId: job.id,
+          type: 'scrape_start'
+        });
+        
+        // Add timeout wrapper for cluster execution
+        const html = await Promise.race([
+          cluster.execute(url),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Scraping timeout exceeded')), 120000) // 2 minutes
+          )
+        ]);
+        
+        await job.updateProgress(40);
+        
+        if (!html) {
+          throw new Error("Failed to retrieve HTML content");
+        }
+
+        return html;
       });
-      
-      // Add timeout wrapper for cluster execution
-      const html = await Promise.race([
-        cluster.execute(url),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Scraping timeout exceeded')), 120000) // 2 minutes
-        )
-      ]);
-      
-      await job.updateProgress(40);
-      
-      if (!html) {
-        throw new Error("Failed to retrieve HTML content");
-      }
       
       const $ = cheerio.load(html);
 
@@ -173,6 +209,12 @@ const worker = new Worker(
 
       await job.updateProgress(100);
       
+      // Cache the successful result
+      await cacheService.set(cacheKey, productData, 'product');
+      
+      // Record success for circuit breaker
+      circuitBreaker.recordSuccess(domain);
+      
       const duration = Date.now() - startTime;
       logger.info(`Successfully processed job ${job.id}: ${productData.title} (${duration}ms)`);
       
@@ -187,6 +229,9 @@ const worker = new Worker(
       };
 
     } catch (error) {
+      // Record failure for circuit breaker
+      circuitBreaker.recordFailure(domain);
+      
       const duration = Date.now() - startTime;
       
       // Enhanced error logging with timeout detection

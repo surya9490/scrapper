@@ -3,14 +3,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { useSession, signIn, signOut, SessionProvider } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-
-interface AuthContextType {
-  user: any
-  loading: boolean
-  login: (email: string, password: string) => Promise<boolean>
-  logout: () => Promise<void>
-  register: (email: string, password: string, username: string) => Promise<boolean>
-}
+import { User, AuthContextType, ApiResponse } from '@/types/auth'
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
@@ -33,31 +26,41 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
 
   const login = async (email: string, password: string): Promise<boolean> => {
     try {
+      setLoading(true)
       const result = await signIn('credentials', {
         email,
         password,
         redirect: false,
       })
 
-      if (result?.ok) {
+      if (result?.ok && !result.error) {
         router.push('/dashboard')
         return true
+      } else {
+        console.error('Login failed:', result?.error)
+        return false
       }
-      return false
     } catch (error) {
       console.error('Login error:', error)
       return false
+    } finally {
+      setLoading(false)
     }
   }
 
   const logout = async (): Promise<void> => {
-    await signOut({ redirect: false })
-    router.push('/auth/signin')
+    try {
+      await signOut({ redirect: false })
+      router.push('/auth/signin')
+    } catch (error) {
+      console.error('Logout error:', error)
+    }
   }
 
   const register = async (email: string, password: string, username: string): Promise<boolean> => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api'}/auth/signup`, {
+      setLoading(true)
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/api/auth/signup`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -72,18 +75,27 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       const data = await response.json()
 
       if (response.ok && data.success) {
-        // Auto-login after successful registration
+        // After successful registration, automatically log in
         return await login(email, password)
+      } else {
+        console.error('Registration failed:', data.message)
+        return false
       }
-      return false
     } catch (error) {
       console.error('Registration error:', error)
       return false
+    } finally {
+      setLoading(false)
     }
   }
 
-  const value = {
-    user: session?.user || null,
+  const value: AuthContextType = {
+    user: session?.user ? {
+      id: session.user.id,
+      email: session.user.email,
+      username: session.user.username,
+      role: session.user.role as 'admin' | 'user',
+    } : null,
     loading,
     login,
     logout,

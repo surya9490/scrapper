@@ -6,8 +6,11 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "start:all": "node start-all.js",
+    "start:worker": "node worker-server.js",
     "dev": "node --watch server.js",
     "dev:nodemon": "nodemon --inspect=0.0.0.0:9229 server.js",
+    "dev:all": "node --watch start-all.js",
     "worker": " node scraper/worker.js",
     "worker:dev": "nodemon scraper/worker.js",
     "db:migrate": "npx prisma migrate dev",

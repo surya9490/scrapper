@@ -19,6 +19,7 @@ import priceMonitoringRouter from './routes/priceMonitoring.js';
 import shopifyRouter from './routes/shopify.js';
 import cronJobsRouter from './routes/cronJobs.js';
 import authRouter from './routes/auth.js';
+import optimizationRouter from './routes/optimization.js';
 
 // Import auth middleware
 import { devAutoAuth, authenticateToken } from './middleware/auth.js';
@@ -123,6 +124,7 @@ app.use("/api/dashboard", authenticateToken, dashboardUserLimiter, dashboardRout
 app.use("/api/price-monitoring", authenticateToken, dashboardUserLimiter, priceMonitoringRouter);
 app.use("/api/shopify", shopifyRouter);
 app.use("/api/cron-jobs", cronJobsRouter);
+app.use("/api/optimization", authenticateToken, dashboardUserLimiter, optimizationRouter);
 
 // Start server
 async function startServer() {

@@ -1,6 +1,5 @@
 import NextAuth from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
-import bcrypt from "bcryptjs"
 
 const handler = NextAuth({
   providers: [
@@ -12,7 +11,7 @@ const handler = NextAuth({
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) {
-          return null
+          throw new Error('Email and password are required')
         }
 
         try {
@@ -32,17 +31,19 @@ const handler = NextAuth({
 
           if (response.ok && data.success && data.data.user) {
             return {
-              id: data.data.user.id,
+              id: data.data.user.id.toString(),
               email: data.data.user.email,
               username: data.data.user.username,
               role: data.data.user.role,
               accessToken: data.data.token,
             }
+          } else {
+            // Return null to indicate authentication failure
+            throw new Error(data.message || 'Authentication failed')
           }
-          return null
         } catch (error) {
           console.error('Authentication error:', error)
-          return null
+          throw new Error(error instanceof Error ? error.message : 'Authentication failed')
         }
       }
     })
@@ -59,15 +60,16 @@ const handler = NextAuth({
     async session({ session, token }) {
       if (token && session.user) {
         session.user.id = token.sub as string
-        session.user.role = token.role
-        session.user.username = token.username
-        session.accessToken = token.accessToken
+        session.user.role = token.role as string
+        session.user.username = token.username as string
+        session.accessToken = token.accessToken as string
       }
       return session
     },
   },
   pages: {
     signIn: '/auth/signin',
+    error: '/auth/signin', // Redirect errors to sign-in page
   },
   session: {
     strategy: "jwt",

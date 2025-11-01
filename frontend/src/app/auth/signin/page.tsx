@@ -25,21 +25,22 @@ export default function SignInPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
-    setLoading(true)
-
+    
     if (!email || !password) {
       setError('Please fill in all fields')
-      setLoading(false)
       return
     }
 
+    setLoading(true)
+    
     try {
       const success = await login(email, password)
       if (!success) {
-        setError('Invalid email or password')
+        setError('Invalid email or password. Please try again.')
       }
     } catch (error) {
-      setError('An error occurred. Please try again.')
+      console.error('Login error:', error)
+      setError('An error occurred during login. Please try again.')
     } finally {
       setLoading(false)
     }

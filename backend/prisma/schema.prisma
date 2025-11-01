@@ -19,6 +19,10 @@ model User {
   password  String?  // Optional for now, will be required when implementing full auth
   role      String   @default("user") // "admin", "user"
   
+  // Password reset functionality
+  resetToken       String?
+  resetTokenExpiry DateTime?
+  
   // Rate limiting settings per user
   dashboardRateLimit Int @default(600)  // requests per minute
   scrapingRateLimit  Int @default(30)   // requests per minute  

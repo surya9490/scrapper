@@ -2,19 +2,35 @@ import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
 import AIService from './aiService.js';
 import logger from '../utils/logger.js';
+import DomainThrottler from '../utils/domainThrottler.js';
+import CircuitBreaker from '../utils/circuitBreaker.js';
+import RetryHandler from '../utils/retryHandler.js';
+import CacheService from '../utils/cacheService.js';
+import ProxyRotation from '../utils/proxyRotation.js';
+import BatchJobService from '../utils/batchJobService.js';
 
 class ScrapingService {
   constructor() {
     this.aiService = new AIService();
     this.browser = null;
-    this.maxRetries = 3;
     this.timeout = 30000;
+    
+    // Initialize optimization utilities
+    this.domainThrottler = new DomainThrottler();
+    this.circuitBreaker = new CircuitBreaker();
+    this.retryHandler = new RetryHandler();
+    this.cacheService = new CacheService();
+    this.proxyRotation = new ProxyRotation();
+    this.batchJobService = new BatchJobService();
   }
 
   async initBrowser() {
     if (!this.browser) {
       try {
-        this.browser = await chromium.launch({
+        // Get proxy configuration
+        const proxy = await this.proxyRotation.getProxy();
+        
+        const launchOptions = {
           headless: true,
           timeout: this.timeout,
           args: [
@@ -23,7 +39,19 @@ class ScrapingService {
             '--disable-dev-shm-usage',
             '--disable-gpu'
           ]
-        });
+        };
+
+        // Add proxy configuration if available
+        if (proxy) {
+          launchOptions.proxy = {
+            server: `${proxy.protocol}://${proxy.host}:${proxy.port}`,
+            username: proxy.username,
+            password: proxy.password
+          };
+          logger.info('Using proxy for browser', { proxyId: proxy.id });
+        }
+
+        this.browser = await chromium.launch(launchOptions);
         logger.info('Browser initialized for scraping service');
       } catch (error) {
         logger.error('Failed to initialize browser:', { error: error.message });
@@ -45,14 +73,40 @@ class ScrapingService {
     }
   }
 
-  // Enhanced product scraping with AI attribute extraction
+  // Enhanced product scraping with all optimizations
   async scrapeProduct(url, retryCount = 0) {
     if (!url || typeof url !== 'string') {
       throw new Error('Invalid URL provided for scraping');
     }
 
+    const domain = new URL(url).hostname;
+    const cacheKey = this.cacheService.generateKey('product', url);
+
+    // Check cache first
+    const cachedProduct = await this.cacheService.get(cacheKey);
+    if (cachedProduct) {
+      logger.info('Product found in cache', { url });
+      return cachedProduct;
+    }
+
+    // Check circuit breaker for domain
+    if (!this.circuitBreaker.canExecute(domain)) {
+      throw new Error(`Circuit breaker is open for domain: ${domain}`);
+    }
+
+    // Apply domain throttling
+    await this.domainThrottler.throttle(domain);
+
+    // Use retry handler with exponential backoff
+    return await this.retryHandler.execute(async () => {
+      return await this._performScrape(url, domain, cacheKey);
+    });
+  }
+
+  async _performScrape(url, domain, cacheKey) {
     const browser = await this.initBrowser();
     let page = null;
+    const proxy = await this.proxyRotation.getProxy();
 
     try {
       page = await browser.newPage();
@@ -60,7 +114,7 @@ class ScrapingService {
       // Set user agent and headers to avoid detection
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
       
-      logger.info('Starting product scrape', { url, attempt: retryCount + 1 });
+      logger.info('Starting product scrape', { url, proxy: proxy?.id });
       
       await page.goto(url, { 
         waitUntil: 'networkidle',
@@ -89,6 +143,17 @@ class ScrapingService {
         scrapedAt: new Date(),
         sourceUrl: url
       };
+
+      // Cache the result
+      await this.cacheService.set(cacheKey, enhancedProduct, 'product');
+      
+      // Record success for circuit breaker
+      this.circuitBreaker.recordSuccess(domain);
+      
+      // Record proxy completion
+      if (proxy) {
+        await this.proxyRotation.recordCompletion(proxy.id);
+      }
       
       logger.info('Product scrape completed successfully', { 
         url, 
@@ -99,19 +164,20 @@ class ScrapingService {
       return enhancedProduct;
 
     } catch (error) {
+      // Record failure for circuit breaker
+      this.circuitBreaker.recordFailure(domain);
+      
+      // Record proxy failure
+      if (proxy) {
+        await this.proxyRotation.recordFailure(proxy.id, error.message);
+      }
+
       logger.error('Product scrape failed', { 
         url, 
-        attempt: retryCount + 1, 
         error: error.message 
       });
 
-      if (retryCount < this.maxRetries) {
-        logger.info('Retrying product scrape', { url, nextAttempt: retryCount + 2 });
-        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1))); // Exponential backoff
-        return this.scrapeProduct(url, retryCount + 1);
-      }
-
-      throw new Error(`Failed to scrape product after ${this.maxRetries + 1} attempts: ${error.message}`);
+      throw error;
     } finally {
       if (page) {
         try {
@@ -368,40 +434,100 @@ class ScrapingService {
   }
 
   // Batch scrape multiple URLs
-  async batchScrapeProducts(urls, concurrency = 3) {
+  // Enhanced batch scraping with optimization utilities
+  async batchScrapeProducts(urls, options = {}) {
+    const {
+      concurrency = 3,
+      useBatching = true,
+      priority = 'normal'
+    } = options;
+
+    if (useBatching) {
+      // Use batch job service for efficient processing
+      const batchId = await this.batchJobService.addJobsToBatch(
+        urls.map(url => ({
+          url,
+          type: 'scrape-product',
+          priority: priority === 'high' ? 1 : priority === 'low' ? 3 : 2
+        }))
+      );
+
+      logger.info('Batch scraping job created', { batchId, urlCount: urls.length });
+      return { batchId, status: 'queued' };
+    }
+
+    // Fallback to direct processing
     const results = [];
     const errors = [];
 
-    // Process URLs in batches to avoid overwhelming the target site
-    for (let i = 0; i < urls.length; i += concurrency) {
-      const batch = urls.slice(i, i + concurrency);
-      
-      const batchPromises = batch.map(async (url) => {
-        try {
-          const product = await this.scrapeProduct(url);
-          return { url, success: true, data: product };
-        } catch (error) {
-          return { url, success: false, error: error.message };
-        }
-      });
+    // Group URLs by domain for better throttling
+    const domainGroups = {};
+    urls.forEach(url => {
+      const domain = new URL(url).hostname;
+      if (!domainGroups[domain]) {
+        domainGroups[domain] = [];
+      }
+      domainGroups[domain].push(url);
+    });
 
-      const batchResults = await Promise.all(batchPromises);
-      
-      batchResults.forEach(result => {
-        if (result.success) {
-          results.push(result.data);
-        } else {
-          errors.push(result);
-        }
-      });
+    // Process each domain group separately
+    for (const [domain, domainUrls] of Object.entries(domainGroups)) {
+      logger.info('Processing domain batch', { domain, urlCount: domainUrls.length });
 
-      // Add delay between batches
-      if (i + concurrency < urls.length) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      // Process URLs in batches to avoid overwhelming the target site
+      for (let i = 0; i < domainUrls.length; i += concurrency) {
+        const batch = domainUrls.slice(i, i + concurrency);
+        
+        const batchPromises = batch.map(async (url) => {
+          try {
+            const product = await this.scrapeProduct(url);
+            return { url, success: true, data: product };
+          } catch (error) {
+            return { url, success: false, error: error.message };
+          }
+        });
+
+        const batchResults = await Promise.all(batchPromises);
+        
+        batchResults.forEach(result => {
+          if (result.success) {
+            results.push(result.data);
+          } else {
+            errors.push(result);
+          }
+        });
+
+        // Add delay between batches for the same domain
+        if (i + concurrency < domainUrls.length) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+
+      // Add delay between different domains
+      const domainKeys = Object.keys(domainGroups);
+      const currentIndex = domainKeys.indexOf(domain);
+      if (currentIndex < domainKeys.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
 
     return { results, errors };
+  }
+
+  // Get batch job status
+  async getBatchStatus(batchId) {
+    return await this.batchJobService.getBatchStatus(batchId);
+  }
+
+  // Process immediate batch (for high priority jobs)
+  async processImmediateBatch(urls, priority = 'high') {
+    return await this.batchJobService.processImmediate(
+      urls.map(url => ({
+        url,
+        type: 'scrape-product',
+        priority: 1
+      }))
+    );
   }
 }
 
