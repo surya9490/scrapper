@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import { getSession } from 'next-auth/react';
 
 // API Configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
@@ -12,13 +13,12 @@ const api: AxiosInstance = axios.create({
   },
 });
 
-// Request interceptor
+// Request interceptor to add auth token from NextAuth session
 api.interceptors.request.use(
-  (config) => {
-    // Add auth token if available
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+  async (config) => {
+    const session = await getSession();
+    if (session?.accessToken) {
+      config.headers.Authorization = `Bearer ${session.accessToken}`;
     }
     return config;
   },
@@ -27,16 +27,15 @@ api.interceptors.request.use(
   }
 );
 
-// Response interceptor
+// Response interceptor to handle auth errors
 api.interceptors.response.use(
   (response: AxiosResponse) => {
     return response;
   },
   (error) => {
     if (error.response?.status === 401) {
-      // Handle unauthorized access
-      localStorage.removeItem('auth_token');
-      window.location.href = '/login';
+      // Redirect to sign-in page on auth errors
+      window.location.href = '/auth/signin';
     }
     return Promise.reject(error);
   }

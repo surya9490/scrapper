@@ -15,6 +15,8 @@ const scrapeRequestSchema = z.object({
 
 router.post("/", async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     // Validate request payload
     const validation = scrapeRequestSchema.safeParse(req.body);
     if (!validation.success) {
@@ -26,9 +28,9 @@ router.post("/", async (req, res) => {
 
     const { url, priority, delay } = validation.data;
 
-    // Check if URL is already being processed or recently scraped
-    const existingProduct = await prisma.competitorProduct.findUnique({
-      where: { url }
+    // Check if URL is already being processed or recently scraped by this user
+    const existingProduct = await prisma.competitorProduct.findFirst({
+      where: { url, userId }
     });
 
     // If product exists and was scraped recently (within last hour), return existing data
@@ -41,10 +43,10 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // Add job to queue
+    // Add job to queue with userId
     const job = await scrapeQueue.add(
       "scrape-product",
-      { url },
+      { url, userId },
       {
         priority: priority === "high" ? 10 : priority === "normal" ? 5 : 1,
         delay: delay * 1000, // Convert to milliseconds
@@ -91,7 +93,10 @@ async function getEstimatedWaitTime() {
 // Get all scraped products
 router.get("/", async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     const products = await prisma.competitorProduct.findMany({
+      where: { userId },
       orderBy: { updatedAt: 'desc' }
     });
 
@@ -112,9 +117,11 @@ router.get("/", async (req, res) => {
 // Get product by ID
 router.get("/:id", async (req, res) => {
   try {
+    const userId = req.user.id;
     const { id } = req.params;
+    
     const product = await prisma.competitorProduct.findUnique({
-      where: { id: parseInt(id) }
+      where: { id: parseInt(id), userId }
     });
 
     if (!product) {

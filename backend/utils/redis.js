@@ -24,8 +24,8 @@ export function initializeRedis() {
 
   try {
     redisClient = new IORedis(connectionString, {
-      // Connection options for BullMQ compatibility
-      maxRetriesPerRequest: null, // Required to be null for BullMQ
+      // Connection options for rate limiting compatibility
+      maxRetriesPerRequest: 3, // Allow retries for rate limiting
       enableReadyCheck: false,
       maxLoadingTimeout: 1000,
       
@@ -41,8 +41,8 @@ export function initializeRedis() {
       connectTimeout: 10000,
       commandTimeout: 30000, // Increased timeout for stability
       
-      // Additional stability options
-      enableOfflineQueue: false,
+      // Enable offline queue for rate limiting
+      enableOfflineQueue: true,
       
       // Family preference (IPv4)
       family: 4,

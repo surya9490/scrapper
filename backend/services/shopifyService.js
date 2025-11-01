@@ -60,7 +60,7 @@ class ShopifyService {
   }
 
   // Handle OAuth callback and store access token
-  async handleCallback(shop, code, state) {
+  async handleCallback(shop, code, state, userId) {
     if (!this.isShopifyAvailable()) {
       throw new Error('Shopify API not configured. Please set SHOPIFY_API_KEY and SHOPIFY_API_SECRET.');
     }
@@ -74,21 +74,20 @@ class ShopifyService {
 
       const { session } = callback;
 
-      // Store or update Shopify store information
+      // Store or update Shopify store information with user association
       const shopifyStore = await this.prisma.shopifyStore.upsert({
-        where: { shop: session.shop },
+        where: { shopDomain: session.shop },
         update: {
+          userId: userId,
           accessToken: session.accessToken,
-          scope: session.scope,
-          isActive: true,
-          lastConnectedAt: new Date()
+          updatedAt: new Date()
         },
         create: {
-          shop: session.shop,
+          userId: userId,
+          shopDomain: session.shop,
           accessToken: session.accessToken,
-          scope: session.scope,
-          isActive: true,
-          lastConnectedAt: new Date()
+          createdAt: new Date(),
+          updatedAt: new Date()
         }
       });
 
@@ -143,26 +142,20 @@ class ShopifyService {
       await this.prisma.shopifyStore.update({
         where: { id: storeId },
         data: {
-          shopifyShopId: shopData.id,
-          name: shopData.name,
-          email: shopData.email,
-          domain: shopData.domain,
-          myshopifyDomain: shopData.myshopifyDomain,
-          plan: shopData.plan?.displayName,
-          currencyCode: shopData.currencyCode,
+          storeName: shopData.name,
+          storeEmail: shopData.email,
+          currency: shopData.currencyCode,
           timezone: shopData.timezoneAbbreviation,
-          weightUnit: shopData.weightUnit
+          updatedAt: new Date()
         }
       });
 
-      return {
-        success: true,
-        shopData
-      };
+      return shopData;
 
     } catch (error) {
       console.error('Error fetching shop info:', error);
-      throw error;
+      // Don't throw error, just log it as shop info is not critical
+      return null;
     }
   }
 

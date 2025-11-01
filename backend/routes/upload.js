@@ -221,6 +221,8 @@ const handleAutoDiscovery = async (userProducts, batchId) => {
 // POST /api/upload - Upload CSV file
 router.post('/', upload.single('csvFile'), async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -238,6 +240,7 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
       // Create upload batch record
       const uploadBatch = await prisma.uploadBatch.create({
         data: {
+          userId,
           filename: req.file.originalname,
           totalRows: csvData.length,
           status: 'processing',
@@ -250,6 +253,7 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
         csvData.map(async (product) => {
           return prisma.userProduct.create({
             data: {
+              userId,
               title: product.title,
               sku: product.sku,
               brand: product.brand,
@@ -273,7 +277,7 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
 
       // Update batch status
       await prisma.uploadBatch.update({
-        where: { id: uploadBatch.id },
+        where: { id: uploadBatch.id, userId },
         data: {
           status: 'completed',
           processedRows: userProducts.length,
@@ -317,7 +321,10 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
 // GET /api/upload/batches - Get all upload batches
 router.get('/batches', async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     const batches = await prisma.uploadBatch.findMany({
+      where: { userId },
       orderBy: {
         uploadedAt: 'desc'
       }
@@ -340,9 +347,10 @@ router.get('/batches', async (req, res) => {
 router.get('/batches/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.id;
     
     const batch = await prisma.uploadBatch.findUnique({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id), userId },
       include: {
         userProducts: true
       }

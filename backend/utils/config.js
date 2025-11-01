@@ -117,7 +117,7 @@ export function getConfig() {
     redisRetryDelay: parseInt(process.env.REDIS_RETRY_DELAY) || 1000,
     
     // External services
-    openaiApiKey: process.env.OPENAI_API_KEY,
+    openaiApiKey: process.env.OPENAI_API_KEY || process.env.HUGGINGFACE_API_KEY,
     jwtSecret: process.env.JWT_SECRET,
     
     // Security configuration

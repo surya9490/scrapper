@@ -1,6 +1,7 @@
 import express from 'express';
 import ShopifyService from '../services/shopifyService.js';
 import PriceMonitoringService from '../services/priceMonitoringService.js';
+import { authenticateToken } from '../middleware/auth.js';
 import prisma from '../utils/prisma.js';
 
 const router = express.Router();
@@ -8,7 +9,7 @@ const shopifyService = new ShopifyService();
 const priceMonitoringService = new PriceMonitoringService();
 
 // GET /api/shopify/auth - Initiate Shopify OAuth
-router.get('/auth', (req, res) => {
+router.get('/auth', authenticateToken, (req, res) => {
   try {
     const { shop } = req.query;
 
@@ -29,10 +30,11 @@ router.get('/auth', (req, res) => {
       return res.status(400).json(authResult);
     }
 
-    // Store state in session or database for validation
+    // Store state and user ID in session for validation
     req.session = req.session || {};
     req.session.shopifyState = state;
     req.session.shopifyShop = shopDomain;
+    req.session.userId = req.user.id; // Store authenticated user ID
 
     res.json({
       success: true,
@@ -61,15 +63,23 @@ router.get('/callback', async (req, res) => {
       });
     }
 
-    // Validate state parameter (in production, check against stored state)
-    // if (req.session?.shopifyState !== state) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     error: 'Invalid state parameter'
-    //   });
-    // }
+    // Validate state parameter and get user ID from session
+    if (!req.session?.shopifyState || req.session.shopifyState !== state) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid state parameter'
+      });
+    }
 
-    const callbackResult = await shopifyService.handleCallback(shop, code, state);
+    const userId = req.session.userId;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'User session not found. Please authenticate first.'
+      });
+    }
+
+    const callbackResult = await shopifyService.handleCallback(shop, code, state, userId);
 
     if (!callbackResult.success) {
       return res.status(400).json(callbackResult);
@@ -79,6 +89,7 @@ router.get('/callback', async (req, res) => {
     if (req.session) {
       delete req.session.shopifyState;
       delete req.session.shopifyShop;
+      delete req.session.userId;
     }
 
     // Redirect to success page or return success response
@@ -86,9 +97,9 @@ router.get('/callback', async (req, res) => {
       success: true,
       message: 'Shopify store connected successfully',
       store: {
-        shop: callbackResult.store.shop,
-        name: callbackResult.store.name,
-        connectedAt: callbackResult.store.lastConnectedAt
+        shop: callbackResult.store.shopDomain,
+        name: callbackResult.store.storeName,
+        connectedAt: callbackResult.store.createdAt
       }
     });
 
@@ -210,11 +221,21 @@ router.post('/update-price', async (req, res) => {
 // GET /api/shopify/sync-history - Get price sync history
 router.get('/sync-history', async (req, res) => {
   try {
+    const userId = req.user.id;
     const { page = 1, limit = 20, shop } = req.query;
     const skip = (page - 1) * limit;
 
     const where = {
-      syncedToShopify: true
+      syncedToShopify: true,
+      competitorProduct: {
+        productMappings: {
+          some: {
+            userProduct: {
+              userId
+            }
+          }
+        }
+      }
     };
 
     if (shop) {
@@ -232,7 +253,12 @@ router.get('/sync-history', async (req, res) => {
           competitorProduct: {
             include: {
               productMappings: {
-                where: { status: 'approved' },
+                where: { 
+                  status: 'approved',
+                  userProduct: {
+                    userId
+                  }
+                },
                 include: {
                   userProduct: {
                     select: { title: true, sku: true }
@@ -309,21 +335,25 @@ router.post('/disconnect', async (req, res) => {
 });
 
 // GET /api/shopify/stores - Get all connected Shopify stores
-router.get('/stores', async (req, res) => {
+router.get('/stores', authenticateToken, async (req, res) => {
   try {
+    const userId = req.user.id;
+    
     const stores = await prisma.shopifyStore.findMany({
-      where: { isActive: true },
+      where: { 
+        userId
+      },
       select: {
         id: true,
-        shop: true,
-        name: true,
-        domain: true,
-        plan: true,
-        currencyCode: true,
-        lastConnectedAt: true,
-        createdAt: true
+        shopDomain: true,
+        storeName: true,
+        storeEmail: true,
+        currency: true,
+        timezone: true,
+        createdAt: true,
+        updatedAt: true
       },
-      orderBy: { lastConnectedAt: 'desc' }
+      orderBy: { updatedAt: 'desc' }
     });
 
     res.json({

@@ -11,9 +11,46 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// User management and authentication
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  username  String   @unique
+  password  String?  // Optional for now, will be required when implementing full auth
+  role      String   @default("user") // "admin", "user"
+  
+  // Rate limiting settings per user
+  dashboardRateLimit Int @default(600)  // requests per minute
+  scrapingRateLimit  Int @default(30)   // requests per minute  
+  uploadRateLimit    Int @default(10)   // requests per minute
+  
+  // User status
+  isActive  Boolean  @default(true)
+  lastLogin DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations - all user data
+  userProducts       UserProduct[]
+  competitorProducts CompetitorProduct[]
+  productMappings    ProductMapping[]
+  priceHistories     PriceHistory[]
+  monitoringItems    MonitoringItem[]
+  priceAlerts        PriceAlert[]
+  uploadBatches      UploadBatch[]
+  monitoringJobs     MonitoringJob[]
+  alerts             Alert[]
+  matchingCandidates MatchingCandidate[]
+  shopifyStores      ShopifyStore[]
+  
+  @@map("users")
+}
+
 // User's uploaded products (SKUs)
 model UserProduct {
   id          Int      @id @default(autoincrement())
+  userId      Int      // Foreign key to User
   sku         String?  @unique
   title       String
   description String?
@@ -39,6 +76,7 @@ model UserProduct {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user               User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   productMappings    ProductMapping[]
   priceHistories     PriceHistory[]
   monitoringItems    MonitoringItem[]
@@ -51,6 +89,7 @@ model UserProduct {
 // Competitor products discovered through scraping
 model CompetitorProduct {
   id          Int      @id @default(autoincrement())
+  userId      Int      // Foreign key to User
   title       String
   url         String   @unique
   price       Float?
@@ -81,6 +120,7 @@ model CompetitorProduct {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   productMappings ProductMapping[]
   priceHistories  PriceHistory[]
   monitoringItems MonitoringItem[]
@@ -92,6 +132,7 @@ model CompetitorProduct {
 // Product mappings between user products and competitor products
 model ProductMapping {
   id                   Int      @id @default(autoincrement())
+  userId               Int      // Foreign key to User
   userProductId        Int
   competitorProductId  Int
   
@@ -114,7 +155,8 @@ model ProductMapping {
   updatedAt DateTime @updatedAt
   
   // Relations
-  userProduct      UserProduct      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userProduct       UserProduct       @relation(fields: [userProductId], references: [id], onDelete: Cascade)
   competitorProduct CompetitorProduct @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
   
   @@unique([userProductId, competitorProductId])
@@ -124,6 +166,7 @@ model ProductMapping {
 // Price history for both user and competitor products
 model PriceHistory {
   id                   Int      @id @default(autoincrement())
+  userId               Int      // Foreign key to User
   userProductId        Int?
   competitorProductId  Int?
   
@@ -142,7 +185,8 @@ model PriceHistory {
   recordedAt DateTime @default(now())
   
   // Relations
-  userProduct      UserProduct?      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userProduct       UserProduct?       @relation(fields: [userProductId], references: [id], onDelete: Cascade)
   competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
   
   @@map("price_histories")
@@ -172,6 +216,7 @@ model Session {
 // Shopify store configuration
 model ShopifyStore {
   id          Int      @id @default(autoincrement())
+  userId      Int      // Foreign key to User
   shopDomain  String   @unique
   accessToken String
   
@@ -191,6 +236,9 @@ model ShopifyStore {
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   @@map("shopify_stores")
 }
@@ -225,6 +273,7 @@ model JobQueue {
 // CSV upload batches
 model UploadBatch {
   id            Int      @id @default(autoincrement())
+  userId        Int      // Foreign key to User
   filename      String
   totalRows     Int
   processedRows Int      @default(0)
@@ -243,6 +292,7 @@ model UploadBatch {
   completedAt   DateTime?
   
   // Relations
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   monitoringJobs MonitoringJob[]
   
   @@map("upload_batches")
@@ -251,6 +301,7 @@ model UploadBatch {
 // Competitor monitoring jobs
 model MonitoringJob {
   id                Int      @id @default(autoincrement())
+  userId            Int      // Foreign key to User
   uploadBatchId     Int?
   
   // Job configuration
@@ -277,6 +328,7 @@ model MonitoringJob {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   uploadBatch       UploadBatch?      @relation(fields: [uploadBatchId], references: [id], onDelete: SetNull)
   monitoringItems   MonitoringItem[]
   alerts            Alert[]
@@ -287,6 +339,7 @@ model MonitoringJob {
 // Individual monitoring items (product pairs)
 model MonitoringItem {
   id                Int      @id @default(autoincrement())
+  userId            Int      // Foreign key to User
   monitoringJobId   Int
   userProductId     Int
   competitorProductId Int?
@@ -312,6 +365,7 @@ model MonitoringItem {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   monitoringJob     MonitoringJob     @relation(fields: [monitoringJobId], references: [id], onDelete: Cascade)
   userProduct       UserProduct       @relation(fields: [userProductId], references: [id], onDelete: Cascade)
   competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: SetNull)
@@ -323,6 +377,7 @@ model MonitoringItem {
 // Alerts and notifications
 model Alert {
   id                Int      @id @default(autoincrement())
+  userId            Int      // Foreign key to User
   monitoringJobId   Int
   monitoringItemId  Int?
   
@@ -346,6 +401,7 @@ model Alert {
   createdAt DateTime @default(now())
   
   // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   monitoringJob     MonitoringJob     @relation(fields: [monitoringJobId], references: [id], onDelete: Cascade)
   
   @@map("alerts")
@@ -354,6 +410,7 @@ model Alert {
 // AI matching candidates (for auto-discovery)
 model MatchingCandidate {
   id                Int      @id @default(autoincrement())
+  userId            Int      // Foreign key to User
   userProductId     Int
   
   // Candidate details
@@ -381,6 +438,7 @@ model MatchingCandidate {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   userProduct       UserProduct @relation(fields: [userProductId], references: [id], onDelete: Cascade)
   
   @@map("matching_candidates")
@@ -389,6 +447,7 @@ model MatchingCandidate {
 // Price alerts for monitoring and notifications
 model PriceAlert {
   id                    String   @id @default(cuid())
+  userId                Int      // Foreign key to User
   
   // Alert metadata
   type                  String   // "price_drop", "price_increase", "competitor_lower", "target_reached", "system"
@@ -419,6 +478,7 @@ model PriceAlert {
   updatedAt DateTime @updatedAt
   
   // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   userProduct       UserProduct?      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
   competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
   

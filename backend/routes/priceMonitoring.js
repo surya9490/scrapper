@@ -171,6 +171,7 @@ router.get('/trends/:competitorProductId', async (req, res) => {
 // GET /api/price-monitoring/alerts - Get price alerts
 router.get('/alerts', async (req, res) => {
   try {
+    const userId = req.user.id;
     const { page = 1, limit = 20, days = 7 } = req.query;
     const skip = (page - 1) * limit;
 
@@ -185,7 +186,16 @@ router.get('/alerts', async (req, res) => {
           OR: [
             { priceChangePercent: { gte: 5 } },   // 5% increase
             { priceChangePercent: { lte: -5 } }   // 5% decrease
-          ]
+          ],
+          competitorProduct: {
+            productMappings: {
+              some: {
+                userProduct: {
+                  userId
+                }
+              }
+            }
+          }
         },
         skip: parseInt(skip),
         take: parseInt(limit),
@@ -193,7 +203,12 @@ router.get('/alerts', async (req, res) => {
           competitorProduct: {
             include: {
               productMappings: {
-                where: { status: 'approved' },
+                where: { 
+                  status: 'approved',
+                  userProduct: {
+                    userId
+                  }
+                },
                 include: {
                   userProduct: {
                     select: { title: true, sku: true }
@@ -211,7 +226,16 @@ router.get('/alerts', async (req, res) => {
           OR: [
             { priceChangePercent: { gte: 5 } },
             { priceChangePercent: { lte: -5 } }
-          ]
+          ],
+          competitorProduct: {
+            productMappings: {
+              some: {
+                userProduct: {
+                  userId
+                }
+              }
+            }
+          }
         }
       })
     ]);
@@ -267,6 +291,7 @@ router.get('/alerts', async (req, res) => {
 // GET /api/price-monitoring/history - Get price monitoring history
 router.get('/history', async (req, res) => {
   try {
+    const userId = req.user.id;
     const { 
       page = 1, 
       limit = 20, 
@@ -281,7 +306,16 @@ router.get('/history', async (req, res) => {
     startDate.setDate(startDate.getDate() - parseInt(days));
 
     const where = {
-      recordedAt: { gte: startDate }
+      recordedAt: { gte: startDate },
+      competitorProduct: {
+        productMappings: {
+          some: {
+            userProduct: {
+              userId
+            }
+          }
+        }
+      }
     };
 
     if (competitorProductId) {
@@ -356,6 +390,7 @@ router.post('/cleanup', async (req, res) => {
 // GET /api/price-monitoring/statistics - Get monitoring statistics
 router.get('/statistics', async (req, res) => {
   try {
+    const userId = req.user.id;
     const { days = 30 } = req.query;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
@@ -372,7 +407,12 @@ router.get('/statistics', async (req, res) => {
       prisma.competitorProduct.count({
         where: {
           productMappings: {
-            some: { status: 'approved' }
+            some: { 
+              status: 'approved',
+              userProduct: {
+                userId
+              }
+            }
           }
         }
       }),
@@ -381,7 +421,10 @@ router.get('/statistics', async (req, res) => {
       prisma.productMapping.count({
         where: {
           status: 'approved',
-          priceMonitoringEnabled: true
+          priceMonitoringEnabled: true,
+          userProduct: {
+            userId
+          }
         }
       }),
       
@@ -389,7 +432,16 @@ router.get('/statistics', async (req, res) => {
       prisma.priceHistory.count({
         where: {
           recordedAt: { gte: startDate },
-          priceChange: { not: 0 }
+          priceChange: { not: 0 },
+          competitorProduct: {
+            productMappings: {
+              some: {
+                userProduct: {
+                  userId
+                }
+              }
+            }
+          }
         }
       }),
       
@@ -400,7 +452,16 @@ router.get('/statistics', async (req, res) => {
           OR: [
             { priceChangePercent: { gte: 5 } },
             { priceChangePercent: { lte: -5 } }
-          ]
+          ],
+          competitorProduct: {
+            productMappings: {
+              some: {
+                userProduct: {
+                  userId
+                }
+              }
+            }
+          }
         }
       }),
       
@@ -408,7 +469,16 @@ router.get('/statistics', async (req, res) => {
       prisma.priceHistory.aggregate({
         where: {
           recordedAt: { gte: startDate },
-          priceChange: { not: 0 }
+          priceChange: { not: 0 },
+          competitorProduct: {
+            productMappings: {
+              some: {
+                userProduct: {
+                  userId
+                }
+              }
+            }
+          }
         },
         _avg: {
           priceChangePercent: true
@@ -420,7 +490,10 @@ router.get('/statistics', async (req, res) => {
         by: ['monitoringFrequency'],
         where: {
           status: 'approved',
-          priceMonitoringEnabled: true
+          priceMonitoringEnabled: true,
+          userProduct: {
+            userId
+          }
         },
         _count: {
           monitoringFrequency: true
