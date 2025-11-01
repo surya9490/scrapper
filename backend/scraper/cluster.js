@@ -1,15 +1,18 @@
 import { chromium } from "playwright";
+import logger from "../utils/logger.js";
 
 let browser;
+let isShuttingDown = false;
 
 export async function getCluster() {
-  if (!browser) {
+  if (!browser && !isShuttingDown) {
     try {
       // Allow headless mode to be controlled via environment variable for debugging
       const headlessMode = process.env.HEADLESS !== 'false';
       
       browser = await chromium.launch({
         headless: headlessMode,
+        timeout: 30000, // 30 second timeout for browser launch
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -24,17 +27,25 @@ export async function getCluster() {
           '--disable-features=TranslateUI',
           '--disable-ipc-flooding-protection',
           '--disable-web-security',
-          '--disable-features=VizDisplayCompositor'
+          '--disable-features=VizDisplayCompositor',
+          '--memory-pressure-off',
+          '--max_old_space_size=4096'
         ]
       });
 
-      console.log("🧭 Playwright Browser started successfully");
-      console.log(`👁️ Headless mode: ${headlessMode}`);
+      logger.info("Playwright Browser started successfully", { 
+        headless: headlessMode,
+        type: 'browser_start' 
+      });
       
     } catch (error) {
-      console.error("❌ Failed to start Playwright browser:", error);
+      logger.error("Failed to start Playwright browser", { error: error.message });
       throw error;
     }
+  }
+
+  if (isShuttingDown) {
+    throw new Error('Browser is shutting down');
   }
 
   return {
@@ -56,7 +67,12 @@ export async function getCluster() {
       const page = await context.newPage();
       
       try {
-        console.log(`🌐 Inside browser task, navigating to: ${url} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+        logger.info("Navigating to URL", { 
+          url, 
+          attempt: retryCount + 1, 
+          maxAttempts: maxRetries + 1,
+          type: 'navigation_start'
+        });
         
         // Determine timeout based on domain and retry count
         const isAmazon = url.includes('amazon');
@@ -69,30 +85,38 @@ export async function getCluster() {
         
         const waitStrategy = isAmazon ? "domcontentloaded" : "networkidle";
         
-        console.log(`⏱️ Using ${timeout/1000}s timeout and '${waitStrategy}' strategy for ${isAmazon ? 'Amazon' : 'general'} site`);
+        logger.info("Navigation strategy configured", {
+          timeout: timeout/1000,
+          strategy: waitStrategy,
+          siteType: isAmazon ? 'Amazon' : 'general',
+          type: 'navigation_config'
+        });
         
         await page.goto(url, { waitUntil: waitStrategy, timeout });
         
         // Log the final URL after navigation (handles redirects)
-        console.log("📍 Final URL after navigation:", page.url());
+        logger.info("Navigation completed", { 
+          finalUrl: page.url(),
+          type: 'navigation_complete'
+        });
         
         // Amazon-specific handling
         if (isAmazon) {
-          console.log("🛒 Detected Amazon page, applying specific handling...");
+          logger.info("Amazon page detected, applying specific handling", { type: 'amazon_handling' });
           
           // Wait for Amazon's main content to load
           try {
             await page.waitForSelector("#productTitle, .product-title, [data-testid*='title']", { timeout: 15000 });
-            console.log("✅ Amazon product title found");
+            logger.info("Amazon product title found", { type: 'amazon_title_found' });
           } catch (error) {
-            console.log("⚠️ Amazon product title not found, trying alternative selectors...");
+            logger.warn("Amazon product title not found, trying alternatives", { type: 'amazon_title_fallback' });
             
             // Try waiting for any content indicator
             try {
               await page.waitForSelector("#dp, .s-result-item, .product", { timeout: 10000 });
-              console.log("✅ Amazon content area found");
+              logger.info("Amazon content area found", { type: 'amazon_content_found' });
             } catch (fallbackError) {
-              console.log("⚠️ No Amazon content indicators found, proceeding anyway");
+              logger.warn("No Amazon content indicators found, proceeding anyway", { type: 'amazon_content_missing' });
             }
           }
           
@@ -101,19 +125,25 @@ export async function getCluster() {
             const cookieButton = await page.$('#sp-cc-accept, [data-testid="accept-cookies"], .a-button-primary');
             if (cookieButton) {
               await cookieButton.click();
-              console.log("🍪 Clicked Amazon cookie consent");
+              logger.info("Amazon cookie consent clicked", { type: 'cookie_consent' });
               await page.waitForTimeout(2000); // Wait for any animations
             }
           } catch (error) {
-            console.log("⚠️ No Amazon cookie consent found or error clicking:", error.message);
+            logger.warn("Amazon cookie consent handling failed", { 
+              error: error.message,
+              type: 'cookie_consent_error'
+            });
           }
         } else {
           // Wait for product title elements to ensure page is loaded (non-Amazon)
           try {
             await page.waitForSelector(".product-title, h1, [data-testid*='title'], .product-name, .pdp-product-name", { timeout: 10000 });
-            console.log("✅ Product title element found");
+            logger.info("Product title element found", { type: 'product_title_found' });
           } catch (error) {
-            console.log("⚠️ No product title element found, proceeding anyway:", error.message);
+            logger.warn("Product title element not found, proceeding anyway", { 
+              error: error.message,
+              type: 'product_title_missing'
+            });
           }
         }
         
@@ -136,28 +166,54 @@ export async function getCluster() {
               });
             });
           });
-          console.log("🍪 Cookie modals removed");
+          logger.info("Cookie modals removed", { type: 'cookie_modals_removed' });
         } catch (error) {
-          console.log("⚠️ Error removing cookie modals:", error.message);
+          logger.warn("Error removing cookie modals", { 
+            error: error.message,
+            type: 'cookie_modal_error'
+          });
         }
         
         const pageContent = await page.content();
         
         // Check HTML length before processing
-        console.log("📏 HTML content length:", pageContent ? pageContent.length : 0);
+        const contentLength = pageContent ? pageContent.length : 0;
+        logger.info("HTML content retrieved", { 
+          contentLength,
+          type: 'content_retrieved'
+        });
+        
         if (!pageContent || pageContent.length < 1000) {
-          console.log("⚠️ HTML content seems too short, might indicate loading issues");
+          logger.warn("HTML content seems too short, might indicate loading issues", {
+            contentLength,
+            type: 'content_warning'
+          });
         }
         
-        console.log("✅ Browser task completed successfully");
+        logger.info("Browser task completed successfully", { 
+          url,
+          contentLength,
+          type: 'task_complete'
+        });
         return pageContent;
         
       } catch (error) {
-        console.error(`❌ Error during scraping attempt ${retryCount + 1}:`, error.message);
+        logger.error("Error during scraping attempt", {
+          attempt: retryCount + 1,
+          error: error.message,
+          errorName: error.name,
+          url,
+          type: 'scraping_error'
+        });
         
         // If it's a timeout error and we haven't exceeded max retries, try again
         if (error.name === 'TimeoutError' && retryCount < maxRetries) {
-          console.log(`🔄 Retrying in 5 seconds... (${retryCount + 1}/${maxRetries})`);
+          logger.info("Retrying scraping task", {
+            retryAttempt: retryCount + 1,
+            maxRetries,
+            delaySeconds: 5,
+            type: 'retry_attempt'
+          });
           await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retry
           
           await context.close(); // Close current context
@@ -181,26 +237,29 @@ export async function getCluster() {
   };
 }
 
+// Graceful shutdown function
 export async function closeCluster() {
-  if (browser) {
+  if (browser && !isShuttingDown) {
+    isShuttingDown = true;
     try {
+      logger.info('Closing browser cluster...', { type: 'shutdown' });
       await browser.close();
       browser = null;
-      console.log("🔒 Playwright browser closed successfully");
+      logger.info('Browser cluster closed successfully', { type: 'shutdown' });
     } catch (error) {
-      console.error("❌ Error closing Playwright browser:", error);
+      logger.error('Error closing browser cluster:', { error: error.message, type: 'shutdown' });
     }
   }
 }
 
 // Graceful shutdown handling
 process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, closing cluster...');
+  logger.info('SIGTERM received, closing cluster', { type: 'shutdown' });
   await closeCluster();
 });
 
 process.on('SIGINT', async () => {
-  console.log('SIGINT received, closing cluster...');
+  logger.info('SIGINT received, closing cluster', { type: 'shutdown' });
   await closeCluster();
 });
 

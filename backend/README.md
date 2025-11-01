@@ -1,16 +1,19 @@
 # AI Product & Price Mapping Tool - Backend
 
-A scalable backend service for scraping and monitoring product prices across e-commerce websites. Built with Node.js, Playwright, PostgreSQL, Redis, and Docker.
+A robust, production-ready backend service for AI-powered product matching and price monitoring with comprehensive error handling and configuration validation. Built with Node.js, Playwright, PostgreSQL, Redis, and Docker.
 
 ## 🚀 Features
 
-- **Web Scraping**: Automated product data extraction using Playwright
-- **Price Monitoring**: Scheduled price checking with configurable intervals
+- **AI-Powered Product Matching**: Uses OpenAI GPT models for intelligent product attribute extraction and matching
+- **Web Scraping**: Automated product data extraction using Playwright with browser management
+- **Price Monitoring**: Scheduled price checking with Redis-based job queues
+- **Shopify Integration**: Connect with Shopify stores for product synchronization
 - **Queue Management**: BullMQ-powered job queue for handling bulk operations
-- **Scalable Architecture**: Docker-based microservices with worker processes
-- **Database Management**: PostgreSQL with Prisma ORM
-- **Caching & Jobs**: Redis for job queues and caching
-- **Health Monitoring**: Built-in health checks and monitoring endpoints
+- **Comprehensive Error Handling**: Robust error handling with retry logic and detailed logging
+- **Configuration Validation**: Automatic environment variable validation with helpful error messages
+- **Security Features**: Rate limiting, CORS protection, and security headers
+- **Graceful Shutdown**: Proper cleanup of browser instances, database connections, and Redis
+- **Health Monitoring**: Built-in health checks and system monitoring endpoints
 
 ## 🏗️ Architecture
 
@@ -51,6 +54,45 @@ cp .env.example .env
 
 # Edit environment variables as needed
 nano .env
+```
+
+#### Required Environment Variables
+
+The server will automatically validate your configuration on startup. The following variables are **required**:
+
+```env
+# OpenAI Configuration (Required)
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# Security (Required)
+JWT_SECRET=your-jwt-secret-key-here
+
+# CORS Configuration (Required)
+CORS_ORIGIN=http://localhost:3000
+```
+
+#### Database & Redis Configuration
+
+```env
+# PostgreSQL Database
+DATABASE_URL=postgresql://username:password@localhost:5432/database_name
+
+# Redis Cache/Queue
+REDIS_URL=redis://localhost:6379
+```
+
+#### Configuration Validation
+
+The server performs automatic environment validation on startup:
+- ✅ **Success**: All required variables are present and valid
+- ⚠️ **Warnings**: Optional variables using default values
+- ❌ **Errors**: Missing required variables (server will not start)
+
+Example validation output:
+```
+✅ Environment configuration validated successfully
+⚠️ LOG_LEVEL not set, using default: info
+❌ OPENAI_API_KEY is required but not provided
 ```
 
 ### 3. Start with Docker

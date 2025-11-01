@@ -3,12 +3,11 @@ import multer from 'multer';
 import csv from 'csv-parser';
 import fs from 'fs';
 import path from 'path';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import AIService from '../services/aiService.js';
 import competitorDiscoveryService from '../services/competitorDiscoveryService.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({

@@ -1,33 +1,42 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import ScrapingService from './scrapingService.js';
 import { Queue, Worker } from 'bullmq';
-import IORedis from 'ioredis';
+import { getRedisClient } from '../utils/redis.js';
+import logger from '../utils/logger.js';
 
 class PriceMonitoringService {
   constructor() {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     this.scrapingService = new ScrapingService();
+    this.maxRetries = 3;
+    this.timeout = 60000; // 60 seconds
     
     // Initialize Redis connection with error handling
     try {
-      this.redis = new IORedis({
-        host: process.env.REDIS_HOST || 'redis',
-        port: process.env.REDIS_PORT || 6379,
-        password: process.env.REDIS_PASSWORD,
-        retryDelayOnFailover: 100,
-        maxRetriesPerRequest: 3,
-        lazyConnect: true,
-      });
+      this.redis = getRedisClient();
 
       // Initialize job queue
       this.priceQueue = new Queue('price-monitoring', {
         connection: this.redis,
+        defaultJobOptions: {
+          removeOnComplete: 100,
+          removeOnFail: 50,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000,
+          },
+        },
       });
 
       // Initialize worker
       this.initializeWorker();
+      
+      logger.info('Price monitoring service initialized successfully');
     } catch (error) {
-      console.warn('Redis connection failed. Price monitoring features will be limited:', error.message);
+      logger.error('Redis connection failed. Price monitoring features will be limited', { 
+        error: error.message 
+      });
       this.redis = null;
       this.priceQueue = null;
     }
@@ -41,27 +50,66 @@ class PriceMonitoringService {
   // Initialize worker for processing price monitoring jobs
   initializeWorker() {
     if (!this.isRedisAvailable()) {
-      console.warn('Redis not available. Workers will not be initialized.');
+      logger.warn('Redis not available. Workers will not be initialized.');
       return;
     }
 
-    // Price monitoring worker
-    new Worker('price-monitoring', async (job) => {
-      const { mappingId } = job.data;
-      return await this.monitorProductPrice(mappingId);
-    }, {
-      connection: this.redis,
-    });
+    try {
+      // Price monitoring worker
+      this.worker = new Worker('price-monitoring', async (job) => {
+        const { mappingId } = job.data;
+        
+        logger.info('Processing price monitoring job', { 
+          jobId: job.id, 
+          mappingId,
+          attempt: job.attemptsMade + 1
+        });
+        
+        return await this.monitorProductPrice(mappingId);
+      }, {
+        connection: this.redis,
+        concurrency: 5,
+      });
+
+      // Worker event handlers
+      this.worker.on('completed', (job, result) => {
+        logger.info('Price monitoring job completed', { 
+          jobId: job.id, 
+          mappingId: job.data.mappingId,
+          result: result ? 'success' : 'no_changes'
+        });
+      });
+
+      this.worker.on('failed', (job, err) => {
+        logger.error('Price monitoring job failed', { 
+          jobId: job?.id, 
+          mappingId: job?.data?.mappingId,
+          error: err.message,
+          attempts: job?.attemptsMade
+        });
+      });
+
+      logger.info('Price monitoring worker initialized');
+    } catch (error) {
+      logger.error('Failed to initialize price monitoring worker', { error: error.message });
+    }
   }
 
   // Schedule price monitoring for a product mapping
   async schedulePriceMonitoring(mappingId, schedule = 'daily') {
-    if (!this.isRedisAvailable()) {
-      console.warn('Redis not available. Price monitoring cannot be scheduled.');
-      return { success: false, error: 'Price monitoring service unavailable' };
-    }
-
     try {
+      // Validate inputs
+      if (!mappingId) {
+        throw new Error('Mapping ID is required');
+      }
+
+      if (!this.isRedisAvailable()) {
+        logger.warn('Redis not available. Price monitoring cannot be scheduled', { mappingId });
+        return { success: false, error: 'Price monitoring service unavailable' };
+      }
+
+      logger.info('Scheduling price monitoring', { mappingId, schedule });
+
       const mapping = await this.prisma.productMapping.findUnique({
         where: { id: mappingId },
         include: {
@@ -71,23 +119,49 @@ class PriceMonitoringService {
       });
 
       if (!mapping) {
-        throw new Error('Product mapping not found');
+        throw new Error(`Product mapping not found: ${mappingId}`);
       }
 
-      // Add job to queue
+      if (!mapping.competitorProduct?.sourceUrl) {
+        throw new Error('Competitor product must have a valid source URL for monitoring');
+      }
+
+      // Add job to queue with proper error handling
+      const jobOptions = {
+        repeat: { pattern: schedule === 'hourly' ? '0 * * * *' : '0 0 * * *' },
+        jobId: `price-monitor-${mappingId}`, // Prevent duplicate jobs
+      };
+
       await this.priceQueue.add('monitor-price', {
         mappingId,
         schedule
-      }, {
-        repeat: { pattern: schedule === 'hourly' ? '0 * * * *' : '0 0 * * *' }
+      }, jobOptions);
+
+      logger.info('Price monitoring scheduled successfully', { 
+        mappingId, 
+        schedule,
+        userProduct: mapping.userProduct.title,
+        competitorProduct: mapping.competitorProduct.title
       });
 
       return {
         success: true,
-        message: `Price monitoring scheduled for mapping ${mappingId}`
+        message: `Price monitoring scheduled for mapping ${mappingId}`,
+        details: {
+          userProduct: mapping.userProduct.title,
+          competitorProduct: mapping.competitorProduct.title,
+          schedule
+        }
       };
+
     } catch (error) {
-      console.error('Error scheduling price monitoring:', error);
+      logger.error('Error scheduling price monitoring', { 
+        mappingId, 
+        schedule,
+        error: error.message,
+        stack: error.stack
+      });
+      
       return {
         success: false,
         error: error.message
@@ -98,6 +172,13 @@ class PriceMonitoringService {
   // Monitor a single product price
   async monitorProductPrice(mappingId) {
     try {
+      // Validate input
+      if (!mappingId) {
+        throw new Error('Mapping ID is required');
+      }
+
+      logger.info('Starting price monitoring for mapping', { mappingId });
+
       const mapping = await this.prisma.productMapping.findUnique({
         where: { id: mappingId },
         include: {
@@ -107,14 +188,51 @@ class PriceMonitoringService {
       });
 
       if (!mapping) {
-        throw new Error('Product mapping not found');
+        throw new Error(`Product mapping not found: ${mappingId}`);
       }
 
-      // Scrape current price
-      const scrapedData = await this.scrapingService.scrapeProduct(mapping.competitorProduct.url);
-      
-      if (!scrapedData || !scrapedData.price) {
-        throw new Error('Failed to scrape product price');
+      if (!mapping.competitorProduct?.sourceUrl) {
+        throw new Error('Competitor product missing source URL');
+      }
+
+      // Scrape current price with retry logic
+      let scrapedData = null;
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+        try {
+          logger.info('Scraping competitor product price', { 
+            mappingId, 
+            attempt, 
+            url: mapping.competitorProduct.sourceUrl 
+          });
+
+          scrapedData = await this.scrapingService.scrapeProduct(
+            mapping.competitorProduct.sourceUrl
+          );
+          
+          if (scrapedData?.price) {
+            break; // Success
+          } else {
+            throw new Error('No price found in scraped data');
+          }
+        } catch (error) {
+          lastError = error;
+          logger.warn('Price scraping attempt failed', { 
+            mappingId, 
+            attempt, 
+            error: error.message 
+          });
+
+          if (attempt < this.maxRetries) {
+            const delay = 1000 * attempt; // Exponential backoff
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      if (!scrapedData?.price) {
+        throw new Error(`Failed to scrape price after ${this.maxRetries} attempts: ${lastError?.message}`);
       }
 
       const currentPrice = parseFloat(scrapedData.price);
@@ -125,27 +243,42 @@ class PriceMonitoringService {
         where: { id: mapping.competitorProduct.id },
         data: {
           price: currentPrice,
-          lastScrapedAt: new Date()
+          lastScrapedAt: new Date(),
+          ...(scrapedData.availability && { availability: scrapedData.availability })
         }
       });
 
       // Create price history record
-      const priceChange = currentPrice - previousPrice;
-      const priceChangePercent = previousPrice > 0 ? (priceChange / previousPrice) * 100 : 0;
-
       const priceHistory = await this.prisma.priceHistory.create({
         data: {
           competitorProductId: mapping.competitorProduct.id,
           price: currentPrice,
-          priceChange,
-          priceChangePercent,
-          scrapedAt: new Date()
+          scrapedAt: new Date(),
+          sourceUrl: mapping.competitorProduct.sourceUrl
         }
       });
 
-      // Create alert if significant price change
-      if (Math.abs(priceChangePercent) >= 5) {
-        await this.createPriceAlert(mapping.competitorProduct.id, mapping.userProduct.id, priceHistory);
+      logger.info('Price monitoring completed', { 
+        mappingId,
+        previousPrice,
+        currentPrice,
+        priceChange: currentPrice - (previousPrice || 0)
+      });
+
+      // Check for significant price changes and create alerts
+      if (previousPrice && Math.abs(currentPrice - previousPrice) > (previousPrice * 0.05)) {
+        try {
+          await this.createPriceAlert(
+            mapping.competitorProduct.id,
+            mapping.userProduct.id,
+            priceHistory
+          );
+        } catch (alertError) {
+          logger.error('Failed to create price alert', { 
+            mappingId, 
+            error: alertError.message 
+          });
+        }
       }
 
       return {
@@ -153,65 +286,93 @@ class PriceMonitoringService {
         mappingId,
         previousPrice,
         currentPrice,
-        priceChange,
-        priceChangePercent
+        priceChange: currentPrice - (previousPrice || 0),
+        priceChangePercent: previousPrice ? ((currentPrice - previousPrice) / previousPrice * 100) : 0
       };
+
     } catch (error) {
-      console.error('Error monitoring product price:', error);
-      throw error;
+      logger.error('Error monitoring product price', { 
+        mappingId, 
+        error: error.message,
+        stack: error.stack
+      });
+      
+      throw new Error(`Price monitoring failed for mapping ${mappingId}: ${error.message}`);
     }
   }
 
-  // Create price alert for significant changes
+  // Create price alert for significant price changes
   async createPriceAlert(competitorProductId, userProductId, priceHistory) {
     try {
-      const alertType = priceHistory.priceChange > 0 ? 'PRICE_INCREASE' : 'PRICE_DECREASE';
-      
+      logger.info('Creating price alert', { 
+        competitorProductId, 
+        userProductId, 
+        priceChange: priceHistory.price 
+      });
+
       await this.prisma.priceAlert.create({
         data: {
-          type: alertType,
           competitorProductId,
           userProductId,
           priceHistoryId: priceHistory.id,
-          message: `Price ${alertType.toLowerCase().replace('_', ' ')} of ${Math.abs(priceHistory.priceChangePercent).toFixed(2)}%`,
+          alertType: 'PRICE_CHANGE',
+          message: `Price changed to $${priceHistory.price}`,
           isRead: false
         }
       });
 
-      return { success: true };
+      logger.info('Price alert created successfully', { 
+        competitorProductId, 
+        userProductId 
+      });
     } catch (error) {
-      console.error('Error creating price alert:', error);
+      logger.error('Error creating price alert', { 
+        competitorProductId, 
+        userProductId, 
+        error: error.message 
+      });
       throw error;
     }
   }
 
-  // Get monitoring status
+  // Get monitoring status for all active jobs
   async getMonitoringStatus() {
     try {
-      const totalMappings = await this.prisma.productMapping.count();
-      const activeMappings = await this.prisma.productMapping.count({
-        where: { isActive: true }
-      });
+      if (!this.isRedisAvailable()) {
+        logger.warn('Redis not available. Cannot get monitoring status');
+        return { success: false, error: 'Price monitoring service unavailable' };
+      }
 
-      const recentAlerts = await this.prisma.priceAlert.count({
-        where: {
-          createdAt: {
-            gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
-          }
-        }
-      });
+      logger.info('Getting monitoring status');
 
-      return {
+      const jobs = await this.priceQueue.getJobs(['waiting', 'active', 'completed', 'failed']);
+      const activeJobs = jobs.filter(job => job.opts.repeat);
+
+      const status = {
         success: true,
-        status: {
-          totalMappings,
-          activeMappings,
-          recentAlerts,
-          redisAvailable: this.isRedisAvailable()
-        }
+        totalJobs: jobs.length,
+        activeMonitoringJobs: activeJobs.length,
+        jobs: activeJobs.map(job => ({
+          id: job.id,
+          mappingId: job.data.mappingId,
+          schedule: job.data.schedule,
+          nextRun: job.opts.repeat?.next || null,
+          status: job.finishedOn ? 'completed' : job.processedOn ? 'active' : 'waiting'
+        }))
       };
+
+      logger.info('Monitoring status retrieved', { 
+        totalJobs: status.totalJobs, 
+        activeJobs: status.activeMonitoringJobs 
+      });
+
+      return status;
     } catch (error) {
-      console.error('Error getting monitoring status:', error);
+      logger.error('Error getting monitoring status', { 
+        error: error.message,
+        stack: error.stack
+      });
+      
       return {
         success: false,
         error: error.message
@@ -219,28 +380,42 @@ class PriceMonitoringService {
     }
   }
 
-  // Stop price monitoring for a mapping
+  // Stop price monitoring for a specific mapping
   async stopPriceMonitoring(mappingId) {
-    if (!this.isRedisAvailable()) {
-      console.warn('Redis not available. Cannot stop scheduled monitoring.');
-      return { success: false, error: 'Price monitoring service unavailable' };
-    }
-
     try {
-      // Remove scheduled jobs for this mapping
-      const jobs = await this.priceQueue.getJobs(['waiting', 'delayed', 'active']);
-      const mappingJobs = jobs.filter(job => job.data.mappingId === mappingId);
-      
-      for (const job of mappingJobs) {
-        await job.remove();
+      if (!this.isRedisAvailable()) {
+        logger.warn('Redis not available. Cannot stop scheduled monitoring', { mappingId });
+        return { success: false, error: 'Price monitoring service unavailable' };
       }
 
-      return {
-        success: true,
-        message: `Stopped price monitoring for mapping ${mappingId}`
-      };
+      logger.info('Stopping price monitoring', { mappingId });
+
+      const jobId = `price-monitor-${mappingId}`;
+      const job = await this.priceQueue.getJob(jobId);
+
+      if (job) {
+        await job.remove();
+        logger.info('Price monitoring stopped successfully', { mappingId, jobId });
+        
+        return {
+          success: true,
+          message: `Price monitoring stopped for mapping ${mappingId}`
+        };
+      } else {
+        logger.warn('No active monitoring job found', { mappingId, jobId });
+        
+        return {
+          success: false,
+          error: 'No active monitoring job found for this mapping'
+        };
+      }
     } catch (error) {
-      console.error('Error stopping price monitoring:', error);
+      logger.error('Error stopping price monitoring', { 
+        mappingId, 
+        error: error.message,
+        stack: error.stack
+      });
+      
       return {
         success: false,
         error: error.message

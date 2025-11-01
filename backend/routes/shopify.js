@@ -1,12 +1,11 @@
 import express from 'express';
 import ShopifyService from '../services/shopifyService.js';
 import PriceMonitoringService from '../services/priceMonitoringService.js';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 
 const router = express.Router();
 const shopifyService = new ShopifyService();
 const priceMonitoringService = new PriceMonitoringService();
-const prisma = new PrismaClient();
 
 // GET /api/shopify/auth - Initiate Shopify OAuth
 router.get('/auth', (req, res) => {

@@ -1,22 +1,29 @@
 import * as cheerio from "cheerio";
+import logger from "./logger.js";
 
 /**
  * Extracts product info (title, price, image) from any e-commerce page HTML.
  * Works across Shopify, WooCommerce, Magento, BigCommerce, custom sites, etc.
  */
 export function extractProductData(html, url) {
-    console.log("HTML content:", html);
+    logger.debug("Starting product data extraction", { 
+      url, 
+      htmlLength: html ? html.length : 0,
+      type: 'extraction_start'
+    });
     
     // Handle null/undefined HTML
     if (!html || typeof html !== 'string') {
-        console.log("⚠️ Invalid HTML provided, returning null product data");
+        logger.warn("Invalid HTML provided, returning null product data", { 
+          url,
+          htmlType: typeof html,
+          type: 'extraction_error'
+        });
         return { title: null, price: null, image: null };
     }
     
   const $ = cheerio.load(html);
   let product = { title: null, price: null, image: null };
-
-  console.log("Extracting product data from:", url);
 
   // ---------- 1️⃣ Parse JSON-LD structured data ----------
   $('script[type="application/json"]').each((_, el) => {
@@ -124,6 +131,14 @@ export function extractProductData(html, url) {
   product.title = product.title || "Unknown Product";
   product.price = product.price || null;
   product.image = product.image || null;
+
+  logger.info("Product data extraction completed", {
+    url,
+    title: product.title,
+    price: product.price,
+    hasImage: !!product.image,
+    type: 'extraction_complete'
+  });
 
   return product;
 }

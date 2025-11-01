@@ -1,57 +1,92 @@
 import { Worker } from "bullmq";
-import IORedis from "ioredis";
+import { getRedisClient } from "../utils/redis.js";
 import * as cheerio from "cheerio";
 import { getCluster } from "./cluster.js";
-import { PrismaClient } from "@prisma/client";
+import prisma from "../utils/prisma.js";
 import dotenv from "dotenv";
+import logger from "../utils/logger.js";
 
 dotenv.config();
 
-const prisma = new PrismaClient();
-
 // Redis connection
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
-  maxRetriesPerRequest: 3,
-  retryDelayOnFailover: 100,
-});
+const connection = getRedisClient();
 
 // Initialize cluster
 const cluster = await getCluster();
 
-console.log("🚀 Starting scrape worker...");
+logger.info("Starting scrape worker");
 
-// Create worker
+// Create worker with proper timeout configuration
 const worker = new Worker(
   "scrape-jobs",
   async (job) => {
     const { url } = job.data;
+    const startTime = Date.now();
+    
+    logger.info(`Processing job ${job.id}: ${url}`, {
+      jobId: job.id,
+      url,
+      type: 'job_start'
+    });
     
     try {
-      console.log(`🔍 Processing job ${job.id}: ${url}`);
-      
       // Update job progress
       await job.updateProgress(10);
       
       let productData;
       
-      // Execute scraping with cluster
-      console.log(`🔍 Starting scrape for: ${url}`);
-      const html = await cluster.execute(url);
+      // Execute scraping with cluster with timeout handling
+      logger.info(`Starting scrape for: ${url}`, {
+        jobId: job.id,
+        type: 'scrape_start'
+      });
+      
+      // Add timeout wrapper for cluster execution
+      const html = await Promise.race([
+        cluster.execute(url),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Scraping timeout exceeded')), 120000) // 2 minutes
+        )
+      ]);
       
       await job.updateProgress(40);
+      
+      if (!html) {
+        throw new Error("Failed to retrieve HTML content");
+      }
       
       const $ = cheerio.load(html);
 
       // Extract product information with multiple selectors
-      const title = $("h1").first().text().trim() || 
-                   $('[data-testid="product-title"]').text().trim() ||
-                   $(".product-title").text().trim() ||
-                   $("title").text().trim();
+      const titleSelectors = [
+        'h1[data-automation-id="product-title"]', // Amazon
+        'h1#productTitle', // Amazon alternative
+        '.product-title h1', // Generic
+        'h1.product-name', // Generic
+        'h1', // Fallback
+        '[data-testid="product-title"]',
+        '.product-title',
+        'title' // Last resort
+      ];
+      
+      let title = null;
+      for (const selector of titleSelectors) {
+        const element = $(selector).first();
+        if (element.length > 0) {
+          title = element.text().trim();
+          if (title && title.length > 0) {
+            break;
+          }
+        }
+      }
 
       await job.updateProgress(60);
 
       // Try multiple price selectors
       const priceSelectors = [
+        '.a-price-whole', // Amazon
+        '.a-price .a-offscreen', // Amazon
+        '.price-current', // Generic
         '[class*="price"]',
         '[data-testid*="price"]',
         '.price',
@@ -62,33 +97,59 @@ const worker = new Worker(
         '[class*="amount"]'
       ];
       
-      let priceText = "";
+      let price = null;
       for (const selector of priceSelectors) {
-        priceText = $(selector).first().text();
-        if (priceText && priceText.trim()) break;
+        const element = $(selector).first();
+        if (element.length > 0) {
+          const priceText = element.text().trim();
+          const priceMatch = priceText.match(/[\d,]+\.?\d*/);
+          if (priceMatch) {
+            price = parseFloat(priceMatch[0].replace(/,/g, ''));
+            break;
+          }
+        }
       }
-      
-      const price = priceText ? parseFloat(priceText.replace(/[₹$,\s]/g, "")) || null : null;
 
       await job.updateProgress(80);
 
       // Extract image with multiple selectors
-      const image = $("img[src*='product']").first().attr("src") ||
-                   $(".product-image img").first().attr("src") ||
-                   $("img[alt*='product']").first().attr("src") ||
-                   $("img").first().attr("src");
+      const imageSelectors = [
+        '#landingImage', // Amazon
+        '.product-image img', // Generic
+        '.main-image img', // Generic
+        'img[data-testid="product-image"]', // Generic
+        "img[src*='product']",
+        "img[alt*='product']",
+        "img"
+      ];
+      
+      let image = null;
+      for (const selector of imageSelectors) {
+        const element = $(selector).first();
+        if (element.length > 0) {
+          image = element.attr('src') || element.attr('data-src');
+          if (image) {
+            // Convert relative URLs to absolute
+            if (image.startsWith('//')) {
+              image = 'https:' + image;
+            } else if (image.startsWith('/')) {
+              const urlObj = new URL(url);
+              image = urlObj.origin + image;
+            } else if (!image.startsWith('http')) {
+              image = `https:${image}`;
+            }
+            break;
+          }
+        }
+      }
 
       productData = { 
         title: title || "Unknown Product", 
         price, 
-        image: image ? (image.startsWith('http') ? image : `https:${image}`) : null 
+        image: image
       };
 
-      console.log(`📦 Extracted data for ${url}:`, {
-        title: productData.title,
-        price: productData.price,
-        hasImage: !!productData.image
-      });
+      logger.debug('Extracted product data', { url, productData });
 
       await job.updateProgress(90);
 
@@ -112,7 +173,8 @@ const worker = new Worker(
 
       await job.updateProgress(100);
       
-      console.log(`✅ Successfully processed job ${job.id}: ${productData.title}`);
+      const duration = Date.now() - startTime;
+      logger.info(`Successfully processed job ${job.id}: ${productData.title} (${duration}ms)`);
       
       return {
         success: true,
@@ -120,11 +182,29 @@ const worker = new Worker(
         productId: savedProduct.id,
         title: productData.title,
         price: productData.price,
-        scrapedAt: new Date().toISOString()
+        scrapedAt: new Date().toISOString(),
+        processingTime: duration
       };
 
     } catch (error) {
-      console.error(`❌ Job ${job.id} failed for ${url}:`, error.message);
+      const duration = Date.now() - startTime;
+      
+      // Enhanced error logging with timeout detection
+      const isTimeout = error.message.includes('timeout') || 
+                       error.message.includes('Timeout') ||
+                       error.name === 'TimeoutError' ||
+                       error.message.includes('Scraping timeout exceeded');
+      
+      logger.error(`Job ${job.id} failed for ${url}:`, {
+        jobId: job.id,
+        url,
+        error: error.message,
+        errorType: error.name,
+        isTimeout,
+        duration,
+        attempts: job.attemptsMade,
+        type: 'job_error'
+      });
       
       // Log error to database (optional)
       try {
@@ -136,14 +216,23 @@ const worker = new Worker(
           },
           create: { 
             url,
-            title: "Failed to scrape",
+            title: isTimeout ? "Scraping timeout" : "Failed to scrape",
             lastScrapedAt: new Date(),
             competitorDomain: new URL(url).hostname,
             competitorName: new URL(url).hostname
           },
         });
       } catch (dbError) {
-        console.error(`❌ Database error for failed job ${job.id}:`, dbError.message);
+        logger.error(`Database error for failed job ${job.id}:`, {
+          jobId: job.id,
+          dbError: dbError.message,
+          type: 'db_error'
+        });
+      }
+      
+      // Re-throw with enhanced error information
+      if (isTimeout) {
+        throw new Error(`Scraping timeout for ${url}: ${error.message}`);
       }
       
       throw error;
@@ -154,41 +243,99 @@ const worker = new Worker(
     concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 3,
     removeOnComplete: 100,
     removeOnFail: 50,
+    settings: {
+      stalledInterval: 30000, // Check for stalled jobs every 30 seconds
+      maxStalledCount: 1, // Max number of times a job can be stalled before failing
+    },
+    // Job timeout configuration
+    defaultJobOptions: {
+      removeOnComplete: 10,
+      removeOnFail: 5,
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 5000,
+      },
+      // Set job timeout to 3 minutes (180 seconds)
+      timeout: 180000,
+    }
   }
 );
 
-// Worker event handlers
+// Worker event handlers with enhanced logging
 worker.on('completed', (job, result) => {
-  console.log(`✅ Job ${job.id} completed successfully`);
+  logger.info('Job completed successfully', { 
+    jobId: job.id, 
+    duration: Date.now() - job.processedOn,
+    type: 'job_completed',
+    result: result ? 'success' : 'no_result'
+  });
 });
 
 worker.on('failed', (job, err) => {
-  console.error(`❌ Job ${job?.id} failed:`, err.message);
+  const isTimeout = err.message.includes('timeout') || 
+                   err.message.includes('Timeout') ||
+                   err.name === 'TimeoutError';
+  
+  logger.error('Job failed', { 
+    jobId: job?.id, 
+    error: err.message, 
+    errorType: err.name,
+    isTimeout,
+    attempts: job?.attemptsMade,
+    maxAttempts: job?.opts?.attempts,
+    url: job?.data?.url,
+    type: 'job_failed' 
+  });
 });
 
 worker.on('error', (err) => {
-  console.error('❌ Worker error:', err);
+  logger.error('Worker error:', { 
+    error: err.message, 
+    errorType: err.name,
+    stack: err.stack,
+    type: 'worker_error' 
+  });
 });
 
 worker.on('ready', () => {
-  console.log('🟢 Worker is ready and waiting for jobs');
+  logger.info('Worker is ready and waiting for jobs', { 
+    concurrency: worker.opts.concurrency,
+    stalledInterval: worker.opts.settings?.stalledInterval,
+    jobTimeout: worker.opts.defaultJobOptions?.timeout,
+    type: 'worker_ready' 
+  });
 });
 
 worker.on('stalled', (jobId) => {
-  console.warn(`⚠️ Job ${jobId} stalled`);
+  logger.warn(`Job ${jobId} stalled - will be retried or failed`, { 
+    jobId, 
+    stalledInterval: worker.opts.settings?.stalledInterval,
+    maxStalledCount: worker.opts.settings?.maxStalledCount,
+    type: 'job_stalled' 
+  });
+});
+
+worker.on('progress', (job, progress) => {
+  logger.debug('Job progress', { 
+    jobId: job.id, 
+    progress, 
+    type: 'job_progress' 
+  });
 });
 
 // Graceful shutdown handling
 const gracefulShutdown = async (signal) => {
-  console.log(`${signal} received, shutting down worker gracefully...`);
+  logger.info(`${signal} received, shutting down worker gracefully`);
   
   try {
     await worker.close();
     await connection.quit();
-    console.log('✅ Worker shutdown completed');
+    // Prisma disconnect is handled by the centralized client
+    logger.info('Worker shutdown completed');
     process.exit(0);
   } catch (error) {
-    console.error('❌ Error during worker shutdown:', error);
+    logger.error('Error during worker shutdown:', error);
     process.exit(1);
   }
 };
@@ -196,4 +343,7 @@ const gracefulShutdown = async (signal) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-console.log(`🔄 Worker started with concurrency: ${worker.opts.concurrency}`);
+logger.info('Worker started', { 
+  concurrency: worker.opts.concurrency,
+  type: 'worker_started' 
+});

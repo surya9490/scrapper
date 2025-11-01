@@ -1,9 +1,9 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import nodemailer from 'nodemailer';
 
 class PriceComparisonService {
   constructor() {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     this.emailTransporter = this.initializeEmailTransporter();
   }
 

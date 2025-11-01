@@ -1,42 +1,70 @@
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
 import AIService from './aiService.js';
+import logger from '../utils/logger.js';
 
 class ScrapingService {
   constructor() {
     this.aiService = new AIService();
     this.browser = null;
+    this.maxRetries = 3;
+    this.timeout = 30000;
   }
 
   async initBrowser() {
     if (!this.browser) {
-      this.browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
+      try {
+        this.browser = await chromium.launch({
+          headless: true,
+          timeout: this.timeout,
+          args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu'
+          ]
+        });
+        logger.info('Browser initialized for scraping service');
+      } catch (error) {
+        logger.error('Failed to initialize browser:', { error: error.message });
+        throw new Error(`Browser initialization failed: ${error.message}`);
+      }
     }
     return this.browser;
   }
 
   async closeBrowser() {
     if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
+      try {
+        await this.browser.close();
+        this.browser = null;
+        logger.info('Browser closed successfully');
+      } catch (error) {
+        logger.error('Error closing browser:', { error: error.message });
+      }
     }
   }
 
   // Enhanced product scraping with AI attribute extraction
-  async scrapeProduct(url) {
+  async scrapeProduct(url, retryCount = 0) {
+    if (!url || typeof url !== 'string') {
+      throw new Error('Invalid URL provided for scraping');
+    }
+
     const browser = await this.initBrowser();
-    const page = await browser.newPage();
+    let page = null;
 
     try {
+      page = await browser.newPage();
+      
       // Set user agent and headers to avoid detection
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
       
+      logger.info('Starting product scrape', { url, attempt: retryCount + 1 });
+      
       await page.goto(url, { 
         waitUntil: 'networkidle',
-        timeout: 30000 
+        timeout: this.timeout 
       });
 
       // Wait for content to load
@@ -47,7 +75,7 @@ class ScrapingService {
 
       // Extract basic product information
       const productData = await this.extractProductData($, url);
-
+      
       // Use AI to extract additional attributes
       const aiAttributes = await this.aiService.extractProductAttributes(
         productData.title,
@@ -61,14 +89,37 @@ class ScrapingService {
         scrapedAt: new Date(),
         sourceUrl: url
       };
+      
+      logger.info('Product scrape completed successfully', { 
+        url, 
+        hasTitle: !!productData.title,
+        hasPrice: !!productData.price 
+      });
 
       return enhancedProduct;
 
     } catch (error) {
-      console.error(`Error scraping ${url}:`, error);
-      throw error;
+      logger.error('Product scrape failed', { 
+        url, 
+        attempt: retryCount + 1, 
+        error: error.message 
+      });
+
+      if (retryCount < this.maxRetries) {
+        logger.info('Retrying product scrape', { url, nextAttempt: retryCount + 2 });
+        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1))); // Exponential backoff
+        return this.scrapeProduct(url, retryCount + 1);
+      }
+
+      throw new Error(`Failed to scrape product after ${this.maxRetries + 1} attempts: ${error.message}`);
     } finally {
-      await page.close();
+      if (page) {
+        try {
+          await page.close();
+        } catch (error) {
+          logger.error('Error closing page:', { error: error.message });
+        }
+      }
     }
   }
 

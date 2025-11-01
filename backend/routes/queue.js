@@ -1,14 +1,11 @@
 import express from "express";
 import { Queue } from "bullmq";
-import IORedis from "ioredis";
+import { getRedisClient } from '../utils/redis.js';
 
 const router = express.Router();
 
 // Redis connection
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
-  maxRetriesPerRequest: 3,
-  retryDelayOnFailover: 100,
-});
+const connection = getRedisClient();
 
 // Create scrape queue
 const scrapeQueue = new Queue("scrape-jobs", { 
@@ -67,18 +64,8 @@ router.post("/", async (req, res) => {
 
     // Add jobs to queue
     const jobs = [];
-    for (const url of validUrls) {
-      const job = await scrapeQueue.add("scrape-job", { url }, {
-        jobId: `scrape-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      });
-      jobs.push({
-        id: job.id,
-        url: url,
-        status: 'queued'
-      });
-    }
+    await Promise.all(validUrls.map(url => scrapeQueue.add('scrape-job', { url }, { jobId: `scrape-${Date.now()}-${Math.random().toString(36).slice(2,11)}` })));
 
-    console.log(`📋 Added ${validUrls.length} jobs to scrape queue`);
     
     res.json({ 
       message: `${validUrls.length} jobs added to queue successfully`,
@@ -100,21 +87,8 @@ router.post("/", async (req, res) => {
 // Get queue status
 router.get("/status", async (req, res) => {
   try {
-    const waiting = await scrapeQueue.getWaiting();
-    const active = await scrapeQueue.getActive();
-    const completed = await scrapeQueue.getCompleted();
-    const failed = await scrapeQueue.getFailed();
-
-    res.json({
-      message: "Queue status retrieved successfully",
-      status: {
-        waiting: waiting.length,
-        active: active.length,
-        completed: completed.length,
-        failed: failed.length,
-        total: waiting.length + active.length + completed.length + failed.length
-      }
-    });
+   const counts = await scrapeQueue.getJobCounts('waiting', 'active', 'completed', 'failed');
+    res.json({ status: counts });
   } catch (error) {
     console.error("Queue status error:", error);
     res.status(500).json({ 

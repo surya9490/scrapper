@@ -1,113 +1,212 @@
 import stringSimilarity from 'string-similarity';
 import AIService from './aiService.js';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
+import logger from '../utils/logger.js';
 
 class MatchingService {
   constructor() {
     this.aiService = new AIService();
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
+    this.maxRetries = 3;
+    this.timeout = 30000; // 30 seconds
   }
 
   // Main product matching function
   async findProductMatches(userProductId, competitorProducts, options = {}) {
     try {
+      // Validate inputs
+      if (!userProductId) {
+        throw new Error('User product ID is required');
+      }
+      
+      if (!Array.isArray(competitorProducts) || competitorProducts.length === 0) {
+        logger.warn('No competitor products provided for matching', { userProductId });
+        return [];
+      }
+
+      logger.info('Starting product matching', { 
+        userProductId, 
+        competitorCount: competitorProducts.length,
+        threshold: options.threshold || 0.6
+      });
+
       const userProduct = await this.prisma.userProduct.findUnique({
         where: { id: userProductId }
       });
 
       if (!userProduct) {
-        throw new Error('User product not found');
+        throw new Error(`User product not found: ${userProductId}`);
       }
 
       const matches = [];
+      const errors = [];
 
-      for (const competitorProduct of competitorProducts) {
-        const matchScore = await this.calculateMatchScore(userProduct, competitorProduct, options);
-        
-        if (matchScore.totalScore >= (options.threshold || 0.6)) {
-          matches.push({
-            competitorProduct,
-            matchScore,
-            confidence: this.calculateConfidence(matchScore)
+      for (const [index, competitorProduct] of competitorProducts.entries()) {
+        try {
+          if (!competitorProduct || typeof competitorProduct !== 'object') {
+            logger.warn('Invalid competitor product', { index, userProductId });
+            continue;
+          }
+
+          const matchScore = await this.calculateMatchScore(userProduct, competitorProduct, options);
+          
+          if (matchScore.totalScore >= (options.threshold || 0.6)) {
+            matches.push({
+              competitorProduct,
+              matchScore,
+              confidence: this.calculateConfidence(matchScore)
+            });
+          }
+        } catch (error) {
+          logger.error('Error matching individual product', { 
+            index, 
+            userProductId, 
+            error: error.message 
           });
+          errors.push({ index, error: error.message });
         }
       }
 
       // Sort by total score descending
       matches.sort((a, b) => b.matchScore.totalScore - a.matchScore.totalScore);
 
+      logger.info('Product matching completed', { 
+        userProductId, 
+        matchCount: matches.length,
+        errorCount: errors.length
+      });
+
       return matches;
 
     } catch (error) {
-      console.error('Error finding product matches:', error);
-      throw error;
+      logger.error('Error finding product matches', { 
+        userProductId, 
+        error: error.message,
+        stack: error.stack
+      });
+      throw new Error(`Product matching failed: ${error.message}`);
     }
   }
 
   // Calculate comprehensive match score
   async calculateMatchScore(userProduct, competitorProduct, options = {}) {
-    const weights = {
-      title: options.titleWeight || 0.4,
-      brand: options.brandWeight || 0.2,
-      category: options.categoryWeight || 0.15,
-      attributes: options.attributesWeight || 0.15,
-      embedding: options.embeddingWeight || 0.1
-    };
+    try {
+      // Validate inputs
+      if (!userProduct || !competitorProduct) {
+        throw new Error('Both user product and competitor product are required');
+      }
 
-    const scores = {
-      titleScore: 0,
-      brandScore: 0,
-      categoryScore: 0,
-      attributesScore: 0,
-      embeddingScore: 0
-    };
+      const weights = {
+        title: options.titleWeight || 0.4,
+        brand: options.brandWeight || 0.2,
+        category: options.categoryWeight || 0.15,
+        attributes: options.attributesWeight || 0.15,
+        embedding: options.embeddingWeight || 0.1
+      };
 
-    // 1. Title similarity
-    scores.titleScore = this.calculateTitleSimilarity(
-      userProduct.title,
-      competitorProduct.title
-    );
+      const scores = {
+        titleScore: 0,
+        brandScore: 0,
+        categoryScore: 0,
+        attributesScore: 0,
+        embeddingScore: 0
+      };
 
-    // 2. Brand similarity
-    scores.brandScore = this.calculateBrandSimilarity(
-      userProduct.brand,
-      competitorProduct.brand
-    );
+      // 1. Title similarity
+      try {
+        scores.titleScore = this.calculateTitleSimilarity(
+          userProduct.title,
+          competitorProduct.title
+        );
+      } catch (error) {
+        logger.warn('Error calculating title similarity', { error: error.message });
+        scores.titleScore = 0;
+      }
 
-    // 3. Category similarity
-    scores.categoryScore = this.calculateCategorySimilarity(
-      userProduct.category,
-      competitorProduct.category
-    );
+      // 2. Brand similarity
+      try {
+        scores.brandScore = this.calculateBrandSimilarity(
+          userProduct.brand,
+          competitorProduct.brand
+        );
+      } catch (error) {
+        logger.warn('Error calculating brand similarity', { error: error.message });
+        scores.brandScore = 0;
+      }
 
-    // 4. Attributes similarity
-    scores.attributesScore = this.calculateAttributesSimilarity(
-      userProduct,
-      competitorProduct
-    );
+      // 3. Category similarity
+      try {
+        scores.categoryScore = this.calculateCategorySimilarity(
+          userProduct.category,
+          competitorProduct.category
+        );
+      } catch (error) {
+        logger.warn('Error calculating category similarity', { error: error.message });
+        scores.categoryScore = 0;
+      }
 
-    // 5. AI embedding similarity (if enabled)
-    if (weights.embedding > 0) {
-      scores.embeddingScore = await this.calculateEmbeddingSimilarity(
-        userProduct,
-        competitorProduct
+      // 4. Attributes similarity
+      try {
+        scores.attributesScore = this.calculateAttributesSimilarity(
+          userProduct,
+          competitorProduct
+        );
+      } catch (error) {
+        logger.warn('Error calculating attributes similarity', { error: error.message });
+        scores.attributesScore = 0;
+      }
+
+      // 5. Embedding similarity (AI-based)
+      try {
+        if (options.useEmbedding !== false) {
+          scores.embeddingScore = await this.calculateEmbeddingSimilarity(
+            userProduct,
+            competitorProduct
+          );
+        }
+      } catch (error) {
+        logger.warn('Error calculating embedding similarity', { error: error.message });
+        scores.embeddingScore = 0;
+      }
+
+      // Calculate weighted total score
+      const totalScore = (
+        scores.titleScore * weights.title +
+        scores.brandScore * weights.brand +
+        scores.categoryScore * weights.category +
+        scores.attributesScore * weights.attributes +
+        scores.embeddingScore * weights.embedding
       );
+
+      return {
+        totalScore: Math.min(Math.max(totalScore, 0), 1), // Clamp between 0 and 1
+        breakdown: this.generateScoreBreakdown(scores, weights),
+        scores,
+        weights
+      };
+
+    } catch (error) {
+      logger.error('Error calculating match score', { 
+        error: error.message,
+        userProductId: userProduct?.id,
+        competitorProductId: competitorProduct?.id
+      });
+      
+      // Return a zero score instead of throwing to allow processing to continue
+      return {
+        totalScore: 0,
+        breakdown: {},
+        scores: {
+          titleScore: 0,
+          brandScore: 0,
+          categoryScore: 0,
+          attributesScore: 0,
+          embeddingScore: 0
+        },
+        weights: options,
+        error: error.message
+      };
     }
-
-    // Calculate weighted total score
-    const totalScore = 
-      (scores.titleScore * weights.title) +
-      (scores.brandScore * weights.brand) +
-      (scores.categoryScore * weights.category) +
-      (scores.attributesScore * weights.attributes) +
-      (scores.embeddingScore * weights.embedding);
-
-    return {
-      ...scores,
-      totalScore,
-      weights,
-      breakdown: this.generateScoreBreakdown(scores, weights)
-    };
   }
 
   // Calculate title similarity using multiple methods

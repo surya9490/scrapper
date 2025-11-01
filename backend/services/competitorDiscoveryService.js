@@ -1,10 +1,9 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import AIService from './aiService.js';
 import { URL } from 'url';
 
-const prisma = new PrismaClient();
 const aiService = new AIService();
 
 class CompetitorDiscoveryService {

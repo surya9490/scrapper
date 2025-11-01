@@ -1,10 +1,9 @@
 import express from 'express';
 import PriceMonitoringService from '../services/priceMonitoringService.js';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 
 const router = express.Router();
 const priceMonitoringService = new PriceMonitoringService();
-const prisma = new PrismaClient();
 
 // GET /api/price-monitoring/status - Get overall monitoring status
 router.get('/status', async (req, res) => {

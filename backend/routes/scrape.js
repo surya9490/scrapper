@@ -1,83 +1,92 @@
 import express from "express";
-import { getCluster } from "../scraper/cluster.js";
-import { PrismaClient } from "@prisma/client";
-import { extractProductData } from "../utils/extractProductData.js";
+import prisma from "../utils/prisma.js";
+import { scrapeQueue } from "./queue.js";
+import { z } from "zod";
+import logger from "../utils/logger.js";
 
-const prisma = new PrismaClient();
 const router = express.Router();
+
+// Validation schema for scrape request
+const scrapeRequestSchema = z.object({
+  url: z.string().url("Invalid URL format"),
+  priority: z.enum(["low", "normal", "high"]).optional().default("normal"),
+  delay: z.number().min(0).optional().default(0)
+});
 
 router.post("/", async (req, res) => {
   try {
-    const { url } = req.body;
-    if (!url) return res.status(400).json({ error: "Missing URL" });
-
-    // Add debugger statement for testing
-    debugger;
-    console.log("🔍 DEBUG: Starting scrape for URL:", url);
-
-    const cluster = await getCluster();
-    let productData = null;
-
-    console.log("🚀 Starting cluster task for URL:", url);
-    let html = null;
-    
-    try {
-      // Use cluster.execute with URL as parameter
-      html = await cluster.execute(url);
-      
-      console.log("🎯 Cluster task finished, HTML length:", html ? html.length : 'null');
-    } catch (error) {
-      console.error("❌ Cluster task error:", error.message);
-      throw error;
-    }
-
-    productData = extractProductData(html, url);
-
-    console.log("Extracted product data:", productData);
-    
-    // Check if product data was found
-    if (!productData || (productData.title === null && productData.price === null && productData.image === null)) {
-      return res.json({
-        message: "Product data not found",
-        data: null
+    // Validate request payload
+    const validation = scrapeRequestSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({ 
+        error: "Invalid request payload",
+        details: validation.error.errors
       });
     }
 
-    // Extract domain from URL for competitorDomain field
-    const urlObj = new URL(url);
-    const competitorDomain = urlObj.hostname;
+    const { url, priority, delay } = validation.data;
 
-    // Save to database
-    const savedProduct = await prisma.competitorProduct.upsert({
-      where: { url },
-      update: {
-        ...productData,
-        lastScrapedAt: new Date()
-      },
-      create: {
-        url,
-        ...productData,
-        competitorDomain,
-        competitorName: competitorDomain,
-        lastScrapedAt: new Date()
-      },
+    // Check if URL is already being processed or recently scraped
+    const existingProduct = await prisma.competitorProduct.findUnique({
+      where: { url }
     });
 
-    console.log(`✅ Successfully scraped: ${productData.title}`);
+    // If product exists and was scraped recently (within last hour), return existing data
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    if (existingProduct && existingProduct.lastScrapedAt > oneHourAgo) {
+      return res.json({
+        message: "Product data retrieved from cache",
+        data: existingProduct,
+        cached: true
+      });
+    }
+
+    // Add job to queue
+    const job = await scrapeQueue.add(
+      "scrape-product",
+      { url },
+      {
+        priority: priority === "high" ? 10 : priority === "normal" ? 5 : 1,
+        delay: delay * 1000, // Convert to milliseconds
+        removeOnComplete: 100,
+        removeOnFail: 50,
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 2000,
+        },
+      }
+    );
 
     res.json({
-      message: "Product scraped successfully",
-      data: savedProduct
+      message: "Scraping job queued successfully",
+      jobId: job.id,
+      url: url,
+      estimatedWaitTime: await getEstimatedWaitTime()
     });
 
   } catch (error) {
-    console.error("Scraping error:", error);
+    console.error("Queue error:", error);
     res.status(500).json({
-      error: "Failed to scrape product",
+      error: "Failed to queue scraping job",
       details: error.message
     });
   }
 });
+
+// Helper function to estimate wait time based on queue length
+async function getEstimatedWaitTime() {
+  try {
+    const waiting = await scrapeQueue.getWaiting();
+    const active = await scrapeQueue.getActive();
+    
+    // Estimate 30 seconds per job on average
+    const estimatedSeconds = (waiting.length + active.length) * 30;
+    return `${Math.ceil(estimatedSeconds / 60)} minutes`;
+  } catch (error) {
+    return "Unknown";
+  }
+}
 
 // Get all scraped products
 router.get("/", async (req, res) => {

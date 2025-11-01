@@ -1,10 +1,17 @@
 import express from "express";
 import cors from "cors";
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import dotenv from "dotenv";
 import { createRequire } from 'module';
 import scrapeRouter from "./routes/scrape.js";
 import queueRouter from "./routes/queue.js";
 import { schedulePriceJob } from "./jobs/priceChecker.js";
+import logger from "./utils/logger.js";
+import { disconnectPrisma } from './utils/prisma.js';
+import { initializeRedis, disconnectRedis } from './utils/redis.js';
+import { closeCluster } from './scraper/cluster.js';
+import { getConfig, logConfigurationStatus } from './utils/config.js';
 
 // Import new routes
 import uploadRouter from './routes/upload.js';
@@ -18,12 +25,50 @@ const require = createRequire(import.meta.url);
 
 dotenv.config();
 
+// Validate environment configuration before starting
+const configValidation = logConfigurationStatus();
+if (!configValidation.success) {
+  logger.error('Server startup failed due to configuration errors', {
+    missingVariables: configValidation.missing,
+    formatErrors: configValidation.formatErrors
+  });
+  process.exit(1);
+}
+
+const config = getConfig();
 const app = express();
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: config.helmetCspEnabled ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  } : false,
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: config.rateLimitWindow,
+  max: config.rateLimitMax,
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
+
+// CORS configuration
+app.use(cors({
+  origin: config.corsOrigin,
+  credentials: true,
+}));
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -51,23 +96,64 @@ app.use("/api/price-monitoring", priceMonitoringRouter);
 app.use("/api/shopify", shopifyRouter);
 app.use("/api/cron-jobs", cronJobsRouter);
 
-// Start scheduled jobs
-schedulePriceJob();
+// Start server
+async function startServer() {
+  try {
+    // Initialize Redis connection
+    await initializeRedis();
+    logger.info('Redis initialized successfully');
 
-const PORT = process.env.PORT || 4000;
+    // Start scheduled jobs
+    schedulePriceJob();
 
-app.listen(PORT, () => {
-  console.log(`✅ Backend server running on port ${PORT}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-});
+    // Start the server
+    const server = app.listen(config.port, () => {
+      logger.info('Backend server started successfully', { 
+        port: config.port,
+        healthCheck: `http://localhost:${config.port}/health`,
+        environment: config.nodeEnv,
+        corsOrigins: config.corsOrigin,
+        type: 'server_start'
+      });
+    });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
+    // Graceful shutdown handling
+    const gracefulShutdown = async (signal) => {
+      logger.info(`Received ${signal}. Starting graceful shutdown...`);
+      
+      server.close(async () => {
+        logger.info('HTTP server closed');
+        
+        try {
+          // Close browser cluster
+          await closeCluster();
+          logger.info('Browser cluster closed');
+          
+          // Close database connection
+          await disconnectPrisma();
+          logger.info('Prisma disconnected');
+          
+          // Close Redis connection
+          await disconnectRedis();
+          logger.info('Redis disconnected');
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  process.exit(0);
-});
+          logger.info('Graceful shutdown completed');
+          process.exit(0);
+        } catch (error) {
+          logger.error('Error during graceful shutdown', { error: error.message });
+          process.exit(1);
+        }
+      });
+    };
+
+    // Handle shutdown signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  } catch (error) {
+    logger.error('Failed to start server', { error: error.message, stack: error.stack });
+    process.exit(1);
+  }
+}
+
+startServer();

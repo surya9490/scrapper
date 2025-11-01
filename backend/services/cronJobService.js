@@ -1,11 +1,11 @@
 import cron from 'node-cron';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import PriceMonitoringService from './priceMonitoringService.js';
 import { scrapeQueue } from '../routes/queue.js';
 
 class CronJobService {
   constructor() {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     this.priceMonitoringService = new PriceMonitoringService();
     this.jobs = new Map();
     this.isInitialized = false;

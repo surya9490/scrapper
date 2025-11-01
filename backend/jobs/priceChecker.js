@@ -1,8 +1,6 @@
 import cron from "node-cron";
-import { PrismaClient } from "@prisma/client";
+import prisma from '../utils/prisma.js';
 import { scrapeQueue } from "../routes/queue.js";
-
-const prisma = new PrismaClient();
 
 export function schedulePriceJob() {
   // Run every 6 hours (0 */6 * * *)

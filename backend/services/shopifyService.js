@@ -1,11 +1,11 @@
 import { shopifyApi, LATEST_API_VERSION } from '@shopify/shopify-api';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import '@shopify/shopify-api/adapters/node';
 import crypto from 'crypto';
 
 class ShopifyService {
   constructor() {
-    this.prisma = new PrismaClient();
+    this.prisma = prisma;
     
     // Only initialize Shopify API if credentials are provided
     if (process.env.SHOPIFY_API_KEY && process.env.SHOPIFY_API_SECRET) {

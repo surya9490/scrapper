@@ -1,11 +1,10 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../utils/prisma.js';
 import MatchingService from '../services/matchingService.js';
 import ScrapingService from '../services/scrapingService.js';
 import AIService from '../services/aiService.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 const aiService = new AIService();
 const scrapingService = new ScrapingService();
 const matchingService = new MatchingService();
