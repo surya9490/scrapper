@@ -106,13 +106,25 @@ class ScrapingService {
   async _performScrape(url, domain, cacheKey) {
     const browser = await this.initBrowser();
     let page = null;
+    let context = null;
     const proxy = await this.proxyRotation.getNextProxy();
 
     try {
-      page = await browser.newPage();
+      // Create browser context with user agent and headers to avoid detection
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        extraHTTPHeaders: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Accept-Encoding': 'gzip, deflate',
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+        }
+      });
       
-      // Set user agent and headers to avoid detection
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+      page = await context.newPage();
       
       logger.info('Starting product scrape', { url, proxy: proxy?.id });
       
@@ -131,7 +143,7 @@ class ScrapingService {
       const productData = await this.extractProductData($, url);
       
       // Use AI to extract additional attributes
-      const aiAttributes = await this.aiService.extractProductAttributes(
+      const aiAttributes = await this.aiService.extractAttributes(
         productData.title,
         productData.description
       );
@@ -184,6 +196,13 @@ class ScrapingService {
           await page.close();
         } catch (error) {
           logger.error('Error closing page:', { error: error.message });
+        }
+      }
+      if (context) {
+        try {
+          await context.close();
+        } catch (error) {
+          logger.error('Error closing context:', { error: error.message });
         }
       }
     }
@@ -361,10 +380,17 @@ class ScrapingService {
   // Search for products on competitor sites
   async searchCompetitorSite(domain, searchKeywords) {
     const browser = await this.initBrowser();
-    const page = await browser.newPage();
+    let context = null;
+    let page = null;
 
     try {
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+      // Create browser context with user agent
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        viewport: { width: 1920, height: 1080 }
+      });
+      
+      page = await context.newPage();
 
       // Common search URL patterns
       const searchUrls = {
@@ -395,7 +421,20 @@ class ScrapingService {
       console.error(`Error searching ${domain}:`, error);
       return [];
     } finally {
-      await page.close();
+      if (page) {
+        try {
+          await page.close();
+        } catch (error) {
+          logger.error('Error closing page:', { error: error.message });
+        }
+      }
+      if (context) {
+        try {
+          await context.close();
+        } catch (error) {
+          logger.error('Error closing context:', { error: error.message });
+        }
+      }
     }
   }
 

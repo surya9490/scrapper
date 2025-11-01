@@ -4,6 +4,7 @@ import { getRedisClient, initializeRedis } from "./utils/redis.js";
 import logger from "./utils/logger.js";
 import { getConfig, logConfigurationStatus } from './utils/config.js';
 import { disconnectPrisma } from './utils/prisma.js';
+import prisma from './utils/prisma.js';
 import { closeCluster } from './scraper/cluster.js';
 import ScrapingService from './services/scrapingService.js';
 import DomainThrottler from './utils/domainThrottler.js';
@@ -150,6 +151,57 @@ class WorkerServer {
       );
 
       await job.updateProgress(90);
+
+      // Save scraped product to database if we have valid data
+      if (result && result.title && userId) {
+        try {
+          const competitorProduct = await prisma.competitorProduct.create({
+            data: {
+              userId,
+              title: result.title || 'Unknown Product',
+              url: result.sourceUrl || url,
+              price: result.price || null,
+              image: result.image || null,
+              brand: result.brand || null,
+              category: result.category || null,
+              material: result.material || null,
+              size: result.size || null,
+              color: result.color || null,
+              threadCount: result.threadCount || null,
+              design: result.design || null,
+              competitorDomain: domain,
+              competitorName: domain,
+              lastScrapedAt: new Date(),
+              scrapingStatus: 'COMPLETED'
+            }
+          });
+
+          logger.info(`Saved scraped product to database`, {
+            jobId: job.id,
+            productId: competitorProduct.id,
+            title: result.title,
+            url: result.sourceUrl || url,
+            type: 'product_saved'
+          });
+        } catch (dbError) {
+          logger.error(`Failed to save scraped product to database`, {
+            jobId: job.id,
+            url,
+            error: dbError.message,
+            type: 'db_save_error'
+          });
+          // Don't throw here - we still want to mark the scraping as successful
+        }
+      } else {
+        logger.warn(`Skipping database save - missing required data`, {
+          jobId: job.id,
+          url,
+          hasResult: !!result,
+          hasTitle: !!(result && result.title),
+          hasUserId: !!userId,
+          type: 'db_save_skipped'
+        });
+      }
 
       // Record success in circuit breaker
       this.circuitBreaker.recordSuccess(domain);

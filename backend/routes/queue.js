@@ -25,6 +25,7 @@ const scrapeQueue = new Queue("scrape-jobs", {
 router.post("/", async (req, res) => {
   try {
     const { urls } = req.body;
+    debugger;
     
     if (!urls || !Array.isArray(urls)) {
       return res.status(400).json({ 

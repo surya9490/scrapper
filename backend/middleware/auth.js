@@ -11,6 +11,11 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
  */
 export const authenticateToken = async (req, res, next) => {
   try {
+    // If user is already authenticated (e.g., by devAutoAuth), continue
+    if (req.user) {
+      return next();
+    }
+
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
