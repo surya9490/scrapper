@@ -126,7 +126,7 @@ class WorkerServer {
     try {
       // Check circuit breaker for domain
       const domain = new URL(url).hostname;
-      if (this.circuitBreaker.isOpen(domain)) {
+      if (await this.circuitBreaker.isOpen(domain)) {
         throw new Error(`Circuit breaker is open for domain: ${domain}`);
       }
 
@@ -136,7 +136,7 @@ class WorkerServer {
       await job.updateProgress(10);
 
       // Execute scraping with retry logic
-      const result = await this.retryHandler.executeWithRetry(
+      const result = await this.retryHandler.execute(
         async () => {
           const productData = await this.scrapingService.scrapeProduct(url);
           return productData;
@@ -213,7 +213,7 @@ class WorkerServer {
           batch.map(async (url) => {
             const domain = new URL(url).hostname;
             
-            if (this.circuitBreaker.isOpen(domain)) {
+            if (await this.circuitBreaker.isOpen(domain)) {
               throw new Error(`Circuit breaker is open for domain: ${domain}`);
             }
 

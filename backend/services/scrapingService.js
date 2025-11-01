@@ -28,7 +28,7 @@ class ScrapingService {
     if (!this.browser) {
       try {
         // Get proxy configuration
-        const proxy = await this.proxyRotation.getProxy();
+        const proxy = await this.proxyRotation.getNextProxy();
         
         const launchOptions = {
           headless: true,
@@ -90,7 +90,7 @@ class ScrapingService {
     }
 
     // Check circuit breaker for domain
-    if (!this.circuitBreaker.canExecute(domain)) {
+    if (await this.circuitBreaker.isOpen(domain)) {
       throw new Error(`Circuit breaker is open for domain: ${domain}`);
     }
 
@@ -106,7 +106,7 @@ class ScrapingService {
   async _performScrape(url, domain, cacheKey) {
     const browser = await this.initBrowser();
     let page = null;
-    const proxy = await this.proxyRotation.getProxy();
+    const proxy = await this.proxyRotation.getNextProxy();
 
     try {
       page = await browser.newPage();

@@ -60,7 +60,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const register = async (email: string, password: string, username: string): Promise<boolean> => {
     try {
       setLoading(true)
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/api/auth/signup`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api'}/auth/signup`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

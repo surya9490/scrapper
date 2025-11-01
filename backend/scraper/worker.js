@@ -55,7 +55,7 @@ const worker = new Worker(
       }
 
       // Check circuit breaker for domain
-      if (!circuitBreaker.canExecute(domain)) {
+      if (await circuitBreaker.isOpen(domain)) {
         throw new Error(`Circuit breaker is open for domain: ${domain}`);
       }
 
