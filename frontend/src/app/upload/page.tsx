@@ -5,12 +5,15 @@ import { apiService, UploadBatch } from '@/lib/api';
 import Card from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 
+type MonitoringType = 'basic' | 'competitor_urls' | 'auto_discovery';
+
 export default function UploadPage() {
   const [batches, setBatches] = useState<UploadBatch[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [monitoringType, setMonitoringType] = useState<MonitoringType>('basic');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -64,7 +67,7 @@ export default function UploadPage() {
         });
       }, 200);
 
-      const response = await apiService.upload.uploadCsv(selectedFile);
+      const response = await apiService.upload.uploadCsvWithMonitoring(selectedFile, monitoringType);
       
       clearInterval(progressInterval);
       setUploadProgress(100);
@@ -94,14 +97,20 @@ export default function UploadPage() {
 
   const handleDownloadTemplate = async () => {
     try {
-      const response = await apiService.upload.downloadTemplate();
+      const response = await apiService.upload.downloadTemplate(monitoringType);
       
       // Create blob and download
       const blob = new Blob([response.data], { type: 'text/csv' });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'product_template.csv';
+      
+      // Set filename based on monitoring type
+      const filename = monitoringType === 'competitor_urls' 
+        ? 'product_upload_with_competitors_template.csv'
+        : 'product_upload_template.csv';
+      link.download = filename;
+      
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -169,6 +178,74 @@ export default function UploadPage() {
         </Card.Header>
         <Card.Content>
           <div className="space-y-4">
+            {/* Monitoring Type Selection */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-3">
+                Monitoring Type
+              </label>
+              <div className="space-y-3">
+                <div className="flex items-start">
+                  <input
+                    id="basic"
+                    name="monitoringType"
+                    type="radio"
+                    value="basic"
+                    checked={monitoringType === 'basic'}
+                    onChange={(e) => setMonitoringType(e.target.value as MonitoringType)}
+                    className="mt-1 h-4 w-4 text-blue-600 border-gray-300 focus:ring-blue-500"
+                  />
+                  <div className="ml-3">
+                    <label htmlFor="basic" className="text-sm font-medium text-gray-700">
+                      Basic Upload
+                    </label>
+                    <p className="text-sm text-gray-500">
+                      Upload products without competitor monitoring. You can set up monitoring later.
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex items-start">
+                  <input
+                    id="competitor_urls"
+                    name="monitoringType"
+                    type="radio"
+                    value="competitor_urls"
+                    checked={monitoringType === 'competitor_urls'}
+                    onChange={(e) => setMonitoringType(e.target.value as MonitoringType)}
+                    className="mt-1 h-4 w-4 text-blue-600 border-gray-300 focus:ring-blue-500"
+                  />
+                  <div className="ml-3">
+                    <label htmlFor="competitor_urls" className="text-sm font-medium text-gray-700">
+                      With Competitor URLs
+                    </label>
+                    <p className="text-sm text-gray-500">
+                      Include competitor URLs in your CSV for immediate price monitoring setup.
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex items-start">
+                  <input
+                    id="auto_discovery"
+                    name="monitoringType"
+                    type="radio"
+                    value="auto_discovery"
+                    checked={monitoringType === 'auto_discovery'}
+                    onChange={(e) => setMonitoringType(e.target.value as MonitoringType)}
+                    className="mt-1 h-4 w-4 text-blue-600 border-gray-300 focus:ring-blue-500"
+                  />
+                  <div className="ml-3">
+                    <label htmlFor="auto_discovery" className="text-sm font-medium text-gray-700">
+                      Auto Discovery
+                    </label>
+                    <p className="text-sm text-gray-500">
+                      Automatically discover and monitor competitor products using AI.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 CSV File
@@ -202,20 +279,31 @@ export default function UploadPage() {
               </div>
             )}
 
-            <div className="flex gap-4">
-              <Button
-                onClick={handleUpload}
-                disabled={!selectedFile || loading}
-                className="btn btn-primary"
-              >
-                {loading ? 'Uploading...' : 'Upload File'}
-              </Button>
-              <Button
-                onClick={handleDownloadTemplate}
-                className="btn"
-              >
-                Download Template
-              </Button>
+            <div className="flex flex-col gap-4">
+              {/* Template info based on monitoring type */}
+              {monitoringType === 'competitor_urls' && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-md">
+                  <p className="text-sm text-blue-800">
+                    <strong>Note:</strong> For competitor URL monitoring, your CSV should include a 'competitor_urls' column with comma-separated URLs.
+                  </p>
+                </div>
+              )}
+              
+              <div className="flex gap-4">
+                <Button
+                  onClick={handleUpload}
+                  disabled={!selectedFile || loading}
+                  className="btn btn-primary"
+                >
+                  {loading ? 'Uploading...' : `Upload with ${monitoringType === 'basic' ? 'Basic' : monitoringType === 'competitor_urls' ? 'Competitor' : 'Auto Discovery'} Monitoring`}
+                </Button>
+                <Button
+                  onClick={handleDownloadTemplate}
+                  className="btn"
+                >
+                  Download {monitoringType === 'competitor_urls' ? 'Competitor URLs' : 'Basic'} Template
+                </Button>
+              </div>
             </div>
           </div>
         </Card.Content>

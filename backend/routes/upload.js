@@ -4,6 +4,8 @@ import csv from 'csv-parser';
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
+import AIService from '../services/aiService.js';
+import competitorDiscoveryService from '../services/competitorDiscoveryService.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -37,10 +39,15 @@ const upload = multer({
   }
 });
 
-// Validate CSV headers
-const validateHeaders = (headers) => {
+// Validate CSV headers based on monitoring type
+const validateHeaders = (headers, monitoringType = 'basic') => {
   const requiredHeaders = ['title', 'sku'];
   const optionalHeaders = ['brand', 'category', 'description', 'price', 'url'];
+  
+  // For competitor monitoring, add competitor_urls as optional
+  if (monitoringType === 'competitor_urls') {
+    optionalHeaders.push('competitor_urls');
+  }
   
   const missingRequired = requiredHeaders.filter(header => 
     !headers.some(h => h.toLowerCase().trim() === header.toLowerCase())
@@ -54,7 +61,7 @@ const validateHeaders = (headers) => {
 };
 
 // Parse and validate CSV data
-const parseCSVData = (filePath) => {
+const parseCSVData = (filePath, monitoringType = 'basic') => {
   return new Promise((resolve, reject) => {
     const results = [];
     let headers = [];
@@ -65,7 +72,7 @@ const parseCSVData = (filePath) => {
       .on('headers', (headerList) => {
         headers = headerList;
         try {
-          validateHeaders(headers);
+          validateHeaders(headers, monitoringType);
         } catch (error) {
           reject(error);
           return;
@@ -97,6 +104,12 @@ const parseCSVData = (filePath) => {
           url: data.url ? data.url.trim() : null
         };
         
+        // Add competitor URLs if provided
+        if (monitoringType === 'competitor_urls' && data.competitor_urls) {
+          const urls = data.competitor_urls.split(',').map(url => url.trim()).filter(url => url);
+          cleanedData.competitor_urls = urls;
+        }
+        
         results.push(cleanedData);
       })
       .on('end', () => {
@@ -112,6 +125,100 @@ const parseCSVData = (filePath) => {
   });
 };
 
+// Helper function to handle known competitor URLs
+const handleKnownCompetitorUrls = async (userProducts, csvData, batchId) => {
+  const aiService = new AIService();
+  
+  for (let i = 0; i < userProducts.length; i++) {
+    const userProduct = userProducts[i];
+    const csvRow = csvData[i];
+    
+    if (csvRow.competitor_urls && csvRow.competitor_urls.length > 0) {
+      console.log(`Processing ${csvRow.competitor_urls.length} competitor URLs for product: ${userProduct.title}`);
+      
+      // Create competitor products for each URL
+      for (const url of csvRow.competitor_urls) {
+        try {
+          // Extract product info from competitor URL
+          const competitorInfo = await competitorDiscoveryService.extractProductInfo(url);
+          
+          if (competitorInfo) {
+            await prisma.competitorProduct.create({
+              data: {
+                title: competitorInfo.title || `Product from ${new URL(url).hostname}`,
+                price: competitorInfo.price,
+                url: url,
+                imageUrl: competitorInfo.imageUrl,
+                description: competitorInfo.description,
+                brand: competitorInfo.brand,
+                category: competitorInfo.category,
+                userProductId: userProduct.id,
+                source: 'MANUAL_URL',
+                confidence: 0.9, // High confidence for manually provided URLs
+                status: 'ACTIVE'
+              }
+            });
+          }
+        } catch (error) {
+          console.error(`Error processing competitor URL ${url}:`, error.message);
+          // Continue with next URL even if one fails
+        }
+      }
+    }
+  }
+};
+
+// Helper function to handle auto-discovery
+const handleAutoDiscovery = async (userProducts, batchId) => {
+  console.log(`Starting auto-discovery for ${userProducts.length} products`);
+  
+  // Process in batches to avoid overwhelming the system
+  const batchSize = 5;
+  for (let i = 0; i < userProducts.length; i += batchSize) {
+    const batch = userProducts.slice(i, i + batchSize);
+    
+    await Promise.all(batch.map(async (userProduct) => {
+      try {
+        console.log(`Auto-discovering competitors for: ${userProduct.title}`);
+        
+        const competitors = await competitorDiscoveryService.discoverCompetitors(userProduct, {
+          maxResults: 10,
+          minConfidence: 0.3
+        });
+        
+        // Create competitor product records
+        for (const competitor of competitors) {
+          await prisma.competitorProduct.create({
+            data: {
+              title: competitor.title,
+              price: competitor.price,
+              url: competitor.url,
+              imageUrl: competitor.imageUrl,
+              description: competitor.description,
+              brand: competitor.brand,
+              category: competitor.category,
+              userProductId: userProduct.id,
+              source: 'AUTO_DISCOVERY',
+              confidence: competitor.confidence,
+              status: 'ACTIVE'
+            }
+          });
+        }
+        
+        console.log(`Found ${competitors.length} competitors for ${userProduct.title}`);
+      } catch (error) {
+        console.error(`Error in auto-discovery for product ${userProduct.title}:`, error.message);
+        // Continue with next product even if one fails
+      }
+    }));
+    
+    // Add delay between batches to be respectful to search engines
+    if (i + batchSize < userProducts.length) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+};
+
 // POST /api/upload - Upload CSV file
 router.post('/', upload.single('csvFile'), async (req, res) => {
   try {
@@ -123,17 +230,19 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
     }
 
     const filePath = req.file.path;
+    const monitoringType = req.body.monitoringType || 'basic'; // 'basic', 'competitor_urls', 'auto_discovery'
     
     try {
       // Parse and validate CSV data
-      const csvData = await parseCSVData(filePath);
+      const csvData = await parseCSVData(filePath, monitoringType);
       
       // Create upload batch record
       const uploadBatch = await prisma.uploadBatch.create({
         data: {
           filename: req.file.originalname,
-          totalProducts: csvData.length,
-          status: 'PROCESSING'
+          totalRows: csvData.length,
+          status: 'processing',
+          uploadType: monitoringType === 'basic' ? 'manual' : monitoringType
         }
       });
 
@@ -156,12 +265,20 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
         })
       );
 
+      // Handle competitor monitoring based on type
+      if (monitoringType === 'competitor_urls') {
+        await handleKnownCompetitorUrls(userProducts, csvData, uploadBatch.id);
+      } else if (monitoringType === 'auto_discovery') {
+        await handleAutoDiscovery(userProducts, uploadBatch.id);
+      }
+
       // Update batch status
       await prisma.uploadBatch.update({
         where: { id: uploadBatch.id },
         data: {
-          status: 'COMPLETED',
-          processedProducts: userProducts.length
+          status: 'completed',
+          processedRows: userProducts.length,
+          successRows: userProducts.length
         }
       });
 
@@ -173,9 +290,11 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
         data: {
           batchId: uploadBatch.id,
           totalProducts: userProducts.length,
-          products: userProducts
+          products: userProducts,
+          monitoringType: monitoringType,
+          competitorMonitoringEnabled: monitoringType !== 'basic'
         },
-        message: `Successfully uploaded ${userProducts.length} products`
+        message: `Successfully uploaded ${userProducts.length} products${monitoringType !== 'basic' ? ' with competitor monitoring' : ''}`
       });
 
     } catch (parseError) {
@@ -252,14 +371,29 @@ router.get('/batches/:id', async (req, res) => {
 
 // GET /api/upload/template - Download CSV template
 router.get('/template', (req, res) => {
-  const templateData = [
-    'title,sku,brand,category,description,price,url',
-    'Sample Product Title,SKU123,Sample Brand,Electronics,Product description here,99.99,https://example.com/product',
-    'Another Product,SKU456,Another Brand,Clothing,Another description,49.99,https://example.com/product2'
-  ].join('\n');
+  const monitoringType = req.query.type || 'basic';
+  
+  let templateData;
+  if (monitoringType === 'competitor_urls') {
+    templateData = [
+      'title,sku,brand,category,description,price,url,competitor_urls',
+      'Sample Product Title,SKU123,Sample Brand,Electronics,Product description here,99.99,https://example.com/product,"https://competitor1.com/product,https://competitor2.com/product"',
+      'Another Product,SKU456,Another Brand,Clothing,Another description,49.99,https://example.com/product2,"https://competitor3.com/product"'
+    ].join('\n');
+  } else {
+    templateData = [
+      'title,sku,brand,category,description,price,url',
+      'Sample Product Title,SKU123,Sample Brand,Electronics,Product description here,99.99,https://example.com/product',
+      'Another Product,SKU456,Another Brand,Clothing,Another description,49.99,https://example.com/product2'
+    ].join('\n');
+  }
+
+  const filename = monitoringType === 'competitor_urls' 
+    ? 'product_upload_with_competitors_template.csv'
+    : 'product_upload_template.csv';
 
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="product_upload_template.csv"');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(templateData);
 });
 

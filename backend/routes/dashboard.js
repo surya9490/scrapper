@@ -216,6 +216,35 @@ router.get('/mappings', async (req, res) => {
   }
 });
 
+router.post('/test', async (req, res) => {
+  try {
+    const { title, description } = req.body;
+
+    if (!title) {
+      return res.status(400).json({
+        success: false,
+        error: 'Title is required'
+      });
+    }
+
+    const attributes = await aiService.extractAttributes(title, description);
+
+    res.json({
+      success: true,
+      data: attributes
+    });
+
+  } catch (error) {
+    console.error('Error testing attributes extraction:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to test attributes extraction'
+    });
+  }
+});
+
+
+
 // POST /api/dashboard/find-matches - Find matches for a user product
 router.post('/find-matches', async (req, res) => {
   try {

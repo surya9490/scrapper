@@ -39,8 +39,11 @@ model UserProduct {
   updatedAt DateTime @updatedAt
   
   // Relations
-  productMappings ProductMapping[]
-  priceHistories  PriceHistory[]
+  productMappings    ProductMapping[]
+  priceHistories     PriceHistory[]
+  monitoringItems    MonitoringItem[]
+  matchingCandidates MatchingCandidate[]
+  priceAlerts        PriceAlert[]
   
   @@map("user_products")
 }
@@ -80,6 +83,8 @@ model CompetitorProduct {
   // Relations
   productMappings ProductMapping[]
   priceHistories  PriceHistory[]
+  monitoringItems MonitoringItem[]
+  priceAlerts     PriceAlert[]
   
   @@map("competitor_products")
 }
@@ -226,6 +231,10 @@ model UploadBatch {
   successRows   Int      @default(0)
   errorRows     Int      @default(0)
   
+  // Upload type and configuration
+  uploadType    String   @default("manual") // manual, competitor_urls, auto_discovery
+  targetWebsite String?  // For auto-discovery: "amazon", "myntra", etc.
+  
   status        String   @default("processing") // processing, completed, failed
   errors        String?  // JSON string with error details
   
@@ -233,5 +242,185 @@ model UploadBatch {
   uploadedAt    DateTime @default(now())
   completedAt   DateTime?
   
+  // Relations
+  monitoringJobs MonitoringJob[]
+  
   @@map("upload_batches")
+}
+
+// Competitor monitoring jobs
+model MonitoringJob {
+  id                Int      @id @default(autoincrement())
+  uploadBatchId     Int?
+  
+  // Job configuration
+  jobName           String
+  jobType           String   // "competitor_urls", "auto_discovery"
+  frequency         String   // "daily", "weekly", "monthly"
+  isActive          Boolean  @default(true)
+  
+  // Monitoring settings
+  priceThreshold    Float?   // Alert when price changes by this %
+  stockMonitoring   Boolean  @default(true)
+  ratingMonitoring  Boolean  @default(false)
+  
+  // Scheduling
+  nextRunAt         DateTime?
+  lastRunAt         DateTime?
+  
+  // Statistics
+  totalProducts     Int      @default(0)
+  activeProducts    Int      @default(0)
+  failedProducts    Int      @default(0)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  uploadBatch       UploadBatch?      @relation(fields: [uploadBatchId], references: [id], onDelete: SetNull)
+  monitoringItems   MonitoringItem[]
+  alerts            Alert[]
+  
+  @@map("monitoring_jobs")
+}
+
+// Individual monitoring items (product pairs)
+model MonitoringItem {
+  id                Int      @id @default(autoincrement())
+  monitoringJobId   Int
+  userProductId     Int
+  competitorProductId Int?
+  
+  // Item configuration
+  isActive          Boolean  @default(true)
+  customThreshold   Float?   // Override job threshold
+  
+  // Discovery metadata (for auto-discovery)
+  searchQuery       String?
+  targetWebsite     String?
+  discoveryStatus   String?  // "pending", "found", "approved", "rejected"
+  confidenceScore   Float?   // AI matching confidence
+  
+  // Monitoring results
+  lastPrice         Float?
+  lastCheckedAt     DateTime?
+  checkCount        Int      @default(0)
+  errorCount        Int      @default(0)
+  lastError         String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  monitoringJob     MonitoringJob     @relation(fields: [monitoringJobId], references: [id], onDelete: Cascade)
+  userProduct       UserProduct       @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: SetNull)
+  
+  @@unique([monitoringJobId, userProductId, competitorProductId])
+  @@map("monitoring_items")
+}
+
+// Alerts and notifications
+model Alert {
+  id                Int      @id @default(autoincrement())
+  monitoringJobId   Int
+  monitoringItemId  Int?
+  
+  // Alert details
+  alertType         String   // "price_change", "stock_out", "competitor_lower", "scraping_failed"
+  title             String
+  message           String
+  severity          String   @default("medium") // "low", "medium", "high", "critical"
+  
+  // Alert data
+  oldValue          String?  // Previous price/stock status
+  newValue          String?  // New price/stock status
+  changePercent     Float?   // Percentage change
+  
+  // Status
+  isRead            Boolean  @default(false)
+  isResolved        Boolean  @default(false)
+  resolvedAt        DateTime?
+  resolvedBy        String?
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  monitoringJob     MonitoringJob     @relation(fields: [monitoringJobId], references: [id], onDelete: Cascade)
+  
+  @@map("alerts")
+}
+
+// AI matching candidates (for auto-discovery)
+model MatchingCandidate {
+  id                Int      @id @default(autoincrement())
+  userProductId     Int
+  
+  // Candidate details
+  title             String
+  url               String
+  price             Float?
+  image             String?
+  website           String   // "amazon", "myntra", etc.
+  
+  // Matching scores
+  titleSimilarity   Float?   // 0.0 to 1.0
+  priceSimilarity   Float?   // 0.0 to 1.0
+  overallScore      Float    // Combined confidence score
+  
+  // Status
+  status            String   @default("pending") // "pending", "approved", "rejected", "auto_approved"
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  
+  // Metadata
+  searchQuery       String?
+  discoveryMethod   String?  // "title_search", "embedding_match", "category_crawl"
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  userProduct       UserProduct @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  
+  @@map("matching_candidates")
+}
+
+// Price alerts for monitoring and notifications
+model PriceAlert {
+  id                    String   @id @default(cuid())
+  
+  // Alert metadata
+  type                  String   // "price_drop", "price_increase", "competitor_lower", "target_reached", "system"
+  severity              String   @default("medium") // "low", "medium", "high", "critical"
+  title                 String
+  message               String
+  
+  // Related entities
+  userProductId         Int?
+  competitorProductId   Int?
+  
+  // Alert data
+  currentPrice          Float?
+  previousPrice         Float?
+  priceChange           Float?
+  priceChangePercent    Float?
+  targetPrice           Float?
+  
+  // Notification settings
+  isRead                Boolean  @default(false)
+  emailSent             Boolean  @default(false)
+  webhookSent           Boolean  @default(false)
+  
+  // Metadata
+  metadata              String?  // JSON string for additional data
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  userProduct       UserProduct?      @relation(fields: [userProductId], references: [id], onDelete: Cascade)
+  competitorProduct CompetitorProduct? @relation(fields: [competitorProductId], references: [id], onDelete: Cascade)
+  
+  @@map("price_alerts")
 }

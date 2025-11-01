@@ -11,6 +11,7 @@ import uploadRouter from './routes/upload.js';
 import dashboardRouter from './routes/dashboard.js';
 import priceMonitoringRouter from './routes/priceMonitoring.js';
 import shopifyRouter from './routes/shopify.js';
+import cronJobsRouter from './routes/cronJobs.js';
 
 // Create require function for CommonJS modules
 const require = createRequire(import.meta.url);
@@ -48,6 +49,7 @@ app.use("/api/upload", uploadRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/price-monitoring", priceMonitoringRouter);
 app.use("/api/shopify", shopifyRouter);
+app.use("/api/cron-jobs", cronJobsRouter);
 
 // Start scheduled jobs
 schedulePriceJob();

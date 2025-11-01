@@ -34,71 +34,60 @@ const worker = new Worker(
       
       let productData;
       
-      await cluster.task(async ({ page }) => {
-        try {
-          // Navigate to page
-          await page.goto(url, { 
-            waitUntil: "networkidle",
-            timeout: 30000 
-          });
-          
-          await job.updateProgress(40);
-          
-          const html = await page.content();
-          const $ = cheerio.load(html);
+      // Execute scraping with cluster
+      console.log(`🔍 Starting scrape for: ${url}`);
+      const html = await cluster.execute(url);
+      
+      await job.updateProgress(40);
+      
+      const $ = cheerio.load(html);
 
-          // Extract product information with multiple selectors
-          const title = $("h1").first().text().trim() || 
-                       $('[data-testid="product-title"]').text().trim() ||
-                       $(".product-title").text().trim() ||
-                       $("title").text().trim();
+      // Extract product information with multiple selectors
+      const title = $("h1").first().text().trim() || 
+                   $('[data-testid="product-title"]').text().trim() ||
+                   $(".product-title").text().trim() ||
+                   $("title").text().trim();
 
-          await job.updateProgress(60);
+      await job.updateProgress(60);
 
-          // Try multiple price selectors
-          const priceSelectors = [
-            '[class*="price"]',
-            '[data-testid*="price"]',
-            '.price',
-            '.product-price',
-            '.current-price',
-            '.sale-price',
-            '[class*="cost"]',
-            '[class*="amount"]'
-          ];
-          
-          let priceText = "";
-          for (const selector of priceSelectors) {
-            priceText = $(selector).first().text();
-            if (priceText && priceText.trim()) break;
-          }
-          
-          const price = priceText ? parseFloat(priceText.replace(/[₹$,\s]/g, "")) || null : null;
+      // Try multiple price selectors
+      const priceSelectors = [
+        '[class*="price"]',
+        '[data-testid*="price"]',
+        '.price',
+        '.product-price',
+        '.current-price',
+        '.sale-price',
+        '[class*="cost"]',
+        '[class*="amount"]'
+      ];
+      
+      let priceText = "";
+      for (const selector of priceSelectors) {
+        priceText = $(selector).first().text();
+        if (priceText && priceText.trim()) break;
+      }
+      
+      const price = priceText ? parseFloat(priceText.replace(/[₹$,\s]/g, "")) || null : null;
 
-          await job.updateProgress(80);
+      await job.updateProgress(80);
 
-          // Extract image with multiple selectors
-          const image = $("img[src*='product']").first().attr("src") ||
-                       $(".product-image img").first().attr("src") ||
-                       $("img[alt*='product']").first().attr("src") ||
-                       $("img").first().attr("src");
+      // Extract image with multiple selectors
+      const image = $("img[src*='product']").first().attr("src") ||
+                   $(".product-image img").first().attr("src") ||
+                   $("img[alt*='product']").first().attr("src") ||
+                   $("img").first().attr("src");
 
-          productData = { 
-            title: title || "Unknown Product", 
-            price, 
-            image: image ? (image.startsWith('http') ? image : `https:${image}`) : null 
-          };
+      productData = { 
+        title: title || "Unknown Product", 
+        price, 
+        image: image ? (image.startsWith('http') ? image : `https:${image}`) : null 
+      };
 
-          console.log(`📦 Extracted data for ${url}:`, {
-            title: productData.title,
-            price: productData.price,
-            hasImage: !!productData.image
-          });
-
-        } catch (pageError) {
-          console.error(`❌ Page error for ${url}:`, pageError.message);
-          throw pageError;
-        }
+      console.log(`📦 Extracted data for ${url}:`, {
+        title: productData.title,
+        price: productData.price,
+        hasImage: !!productData.image
       });
 
       await job.updateProgress(90);
@@ -189,17 +178,17 @@ worker.on('stalled', (jobId) => {
   console.warn(`⚠️ Job ${jobId} stalled`);
 });
 
-// Graceful shutdown
+// Graceful shutdown handling
 const gracefulShutdown = async (signal) => {
   console.log(`${signal} received, shutting down worker gracefully...`);
   
   try {
     await worker.close();
-    await prisma.$disconnect();
-    console.log('👋 Worker shut down successfully');
+    await connection.quit();
+    console.log('✅ Worker shutdown completed');
     process.exit(0);
   } catch (error) {
-    console.error('❌ Error during shutdown:', error);
+    console.error('❌ Error during worker shutdown:', error);
     process.exit(1);
   }
 };

@@ -152,6 +152,60 @@ export interface ShopifyStore {
   updatedAt: string;
 }
 
+export interface CronJobStatus {
+  name: string;
+  schedule: string;
+  isActive: boolean;
+  lastRun?: string;
+  nextRun?: string;
+  status: 'running' | 'stopped' | 'error';
+}
+
+export interface CronJobHealth {
+  success: boolean;
+  status: string;
+  cronJobService: {
+    initialized: boolean;
+    totalJobs: number;
+  };
+  priceComparisonService: {
+    available: boolean;
+  };
+}
+
+export interface CronJobDashboard {
+  totalProducts: number;
+  activeMappings: number;
+  recentPriceChanges: number;
+  significantChanges: number;
+}
+
+export interface PriceAlert {
+  id: string;
+  competitorProductId: string;
+  userProductId: string;
+  oldPrice: number;
+  newPrice: number;
+  changePercentage: number;
+  severity: 'low' | 'medium' | 'high';
+  createdAt: string;
+  competitorProduct?: CompetitorProduct;
+  userProduct?: UserProduct;
+}
+
+export interface PriceComparison {
+  id: string;
+  userProductId: string;
+  competitorProductId: string;
+  userPrice?: number;
+  competitorPrice: number;
+  priceDifference: number;
+  percentageDifference: number;
+  comparedAt: string;
+  userProduct?: UserProduct;
+  competitorProduct?: CompetitorProduct;
+}
+
 // API Services
 export const apiService = {
   // Health check
@@ -263,6 +317,18 @@ export const apiService = {
         },
       });
     },
+    
+    uploadCsvWithMonitoring: (file: File, monitoringType: string = 'basic') => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('monitoringType', monitoringType);
+      return api.post('/upload/csv', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+    },
+    
     getBatches: (params?: {
       page?: number;
       limit?: number;
@@ -271,31 +337,93 @@ export const apiService = {
     
     getBatch: (id: string) => api.get(`/upload/batches/${id}`),
     
-    downloadTemplate: () => api.get('/upload/template', {
+    downloadTemplate: (type: string = 'basic') => api.get('/upload/template', {
+      params: { type },
       responseType: 'blob',
     }),
   },
 
   // Shopify APIs
+  cronJobs: {
+    // Initialize cron job service
+    initialize: () => api.post('/cron-jobs/initialize'),
+
+    // Get health status
+    getHealth: () => api.get('/cron-jobs/health'),
+
+    // Get job status
+    getStatus: () => api.get('/cron-jobs/status'),
+
+    // Create new job
+    createJob: (jobData: {
+      name: string;
+      schedule: string;
+      type: string;
+      data?: any;
+    }) => api.post('/cron-jobs/create', jobData),
+
+    // Stop specific job
+    stopJob: (jobName: string) => api.post(`/cron-jobs/stop/${jobName}`),
+
+    // Stop all jobs
+    stopAllJobs: () => api.post('/cron-jobs/stop-all'),
+
+    // Trigger jobs manually
+    triggerPriceMonitoring: () => api.post('/cron-jobs/trigger/price-monitoring'),
+    triggerPriceComparison: () => api.post('/cron-jobs/trigger/price-comparison'),
+
+    // Dashboard data
+    getDashboard: () => api.get('/cron-jobs/dashboard'),
+
+    // Price alerts
+    getAlerts: (params?: {
+      page?: number;
+      limit?: number;
+      severity?: string;
+      startDate?: string;
+      endDate?: string;
+    }) => api.get('/cron-jobs/alerts', { params }),
+
+    // Price comparison endpoints
+    getPriceComparisons: (params?: {
+      page?: number;
+      limit?: number;
+      startDate?: string;
+      endDate?: string;
+    }) => api.get('/cron-jobs/price-comparisons', { params }),
+
+    getSignificantChanges: (params?: {
+      page?: number;
+      limit?: number;
+      threshold?: number;
+    }) => api.get('/cron-jobs/significant-changes', { params }),
+
+    getRecentChanges: (params?: {
+      page?: number;
+      limit?: number;
+      hours?: number;
+    }) => api.get('/cron-jobs/recent-changes', { params }),
+  },
+
   shopify: {
     auth: (shop: string) => api.get('/shopify/auth', { params: { shop } }),
-    
+
     callback: (params: { code: string; shop: string; state: string }) => 
       api.get('/shopify/callback', { params }),
-    
+
     getStatus: (shop: string) => api.get(`/shopify/status/${shop}`),
-    
+
     getProducts: (shop: string, params?: {
       page?: number;
       limit?: number;
     }) => api.get(`/shopify/products/${shop}`, { params }),
-    
+
     syncPrices: (mappingIds: string[]) => 
       api.post('/shopify/sync-prices', { mappingIds }),
-    
+
     updatePrice: (productId: string, variantId: string, price: number) => 
       api.post('/shopify/update-price', { productId, variantId, price }),
-    
+
     getSyncHistory: (params?: {
       page?: number;
       limit?: number;
@@ -303,12 +431,12 @@ export const apiService = {
       startDate?: string;
       endDate?: string;
     }) => api.get('/shopify/sync-history', { params }),
-    
+
     disconnect: (shop: string) => 
       api.post('/shopify/disconnect', { shop }),
-    
+
     getStores: () => api.get('/shopify/stores'),
-    
+
     scheduleSync: (shop: string, schedule: string, mappingIds: string[]) => 
       api.post('/shopify/schedule-sync', { shop, schedule, mappingIds }),
   },

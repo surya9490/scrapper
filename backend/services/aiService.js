@@ -3,9 +3,10 @@ import OpenAI from 'openai/index.mjs';
 class AIService {
   constructor() {
     // Only initialize OpenAI if API key is provided
-    if (process.env.OPENAI_API_KEY) {
+    if (process.env.HUGGINGFACE_API_KEY) {
       this.openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
+        apiKey: process.env.HUGGINGFACE_API_KEY,
+        baseURL: 'https://router.huggingface.co/v1',
       });
     } else {
       console.warn('OpenAI API key not provided. AI features will be disabled.');
@@ -48,7 +49,7 @@ class AIService {
       `;
 
       const response = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "MiniMaxAI/MiniMax-M2",
         messages: [
           {
             role: "system",
@@ -106,7 +107,7 @@ class AIService {
 
     try {
       const response = await this.openai.embeddings.create({
-        model: "text-embedding-ada-002",
+        model: "MiniMaxAI/MiniMax-M2",
         input: text
       });
 

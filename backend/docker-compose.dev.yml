@@ -19,7 +19,7 @@ services:
       - REDIS_HOST=redis
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/productdb
     ports:
-      - "4001:4001"
+      - "4001:4000"
       - "9229:9229" # Debug port
     depends_on:
       - db

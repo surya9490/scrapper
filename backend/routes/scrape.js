@@ -11,6 +11,10 @@ router.post("/", async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: "Missing URL" });
 
+    // Add debugger statement for testing
+    debugger;
+    console.log("🔍 DEBUG: Starting scrape for URL:", url);
+
     const cluster = await getCluster();
     let productData = null;
 
