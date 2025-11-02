@@ -113,7 +113,7 @@ router.get('/callback', async (req, res) => {
 });
 
 // GET /api/shopify/status/:shop - Get Shopify store connection status
-router.get('/status/:shop', async (req, res) => {
+router.get('/status/:shop', authenticateToken, async (req, res) => {
   try {
     const { shop } = req.params;
     const shopDomain = shop.includes('.myshopify.com') ? shop : `${shop}.myshopify.com`;
@@ -131,17 +131,19 @@ router.get('/status/:shop', async (req, res) => {
 });
 
 // GET /api/shopify/products/:shop - Fetch products from Shopify store
-router.get('/products/:shop', async (req, res) => {
+router.get('/products/:shop', authenticateToken, async (req, res) => {
   try {
     const { shop } = req.params;
     const { limit = 50, cursor, query } = req.query;
+    const userId = req.user.id;
     
     const shopDomain = shop.includes('.myshopify.com') ? shop : `${shop}.myshopify.com`;
 
     const products = await shopifyService.fetchProducts(shopDomain, {
       limit: parseInt(limit),
       cursor,
-      query
+      query,
+      userId
     });
 
     res.json(products);
@@ -156,9 +158,10 @@ router.get('/products/:shop', async (req, res) => {
 });
 
 // POST /api/shopify/sync-prices - Sync competitor prices to Shopify
-router.post('/sync-prices', async (req, res) => {
+router.post('/sync-prices', authenticateToken, async (req, res) => {
   try {
     const { shop, mappingIds, options = {} } = req.body;
+    const userId = req.user.id;
 
     if (!shop || !mappingIds || !Array.isArray(mappingIds)) {
       return res.status(400).json({
@@ -172,7 +175,7 @@ router.post('/sync-prices', async (req, res) => {
     const syncResult = await shopifyService.syncCompetitorPrices(
       shopDomain,
       mappingIds,
-      options
+      { ...options, userId }
     );
 
     res.json(syncResult);
@@ -187,9 +190,10 @@ router.post('/sync-prices', async (req, res) => {
 });
 
 // POST /api/shopify/update-price - Update single product price
-router.post('/update-price', async (req, res) => {
+router.post('/update-price', authenticateToken, async (req, res) => {
   try {
     const { shop, variantId, price, compareAtPrice } = req.body;
+    const userId = req.user.id;
 
     if (!shop || !variantId || !price) {
       return res.status(400).json({
@@ -204,7 +208,8 @@ router.post('/update-price', async (req, res) => {
       shopDomain,
       variantId,
       parseFloat(price),
-      compareAtPrice ? parseFloat(compareAtPrice) : null
+      compareAtPrice ? parseFloat(compareAtPrice) : null,
+      { userId }
     );
 
     res.json(updateResult);
@@ -219,7 +224,7 @@ router.post('/update-price', async (req, res) => {
 });
 
 // GET /api/shopify/sync-history - Get price sync history
-router.get('/sync-history', async (req, res) => {
+router.get('/sync-history', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { page = 1, limit = 20, shop } = req.query;
@@ -309,7 +314,7 @@ router.get('/sync-history', async (req, res) => {
 });
 
 // POST /api/shopify/disconnect - Disconnect Shopify store
-router.post('/disconnect', async (req, res) => {
+router.post('/disconnect', authenticateToken, async (req, res) => {
   try {
     const { shop } = req.body;
 
@@ -371,7 +376,7 @@ router.get('/stores', authenticateToken, async (req, res) => {
 });
 
 // POST /api/shopify/schedule-sync - Schedule automatic price sync
-router.post('/schedule-sync', async (req, res) => {
+router.post('/schedule-sync', authenticateToken, async (req, res) => {
   try {
     const { shop, mappingIds, schedule = 'daily' } = req.body;
 

@@ -1,0 +1,6 @@
+title,sku,brand,category,price,url
+Sample Product 1,SP-001,BrandX,CategoryA,9.99,https://example.com/product1
+Sample Product 2,SP-002,BrandY,CategoryB,19.49,https://example.com/product2
+title,sku,brand,category,description,price,url
+Sample Product Title,SKU123,Sample Brand,Electronics,Product description here,99.99,https://example.com/product
+Another Product,SKU456,Another Brand,Clothing,Another description,49.99,https://example.com/product2

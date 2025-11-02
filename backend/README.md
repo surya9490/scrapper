@@ -1,10 +1,10 @@
 # AI Product & Price Mapping Tool - Backend
 
-A robust, production-ready backend service for AI-powered product matching and price monitoring with comprehensive error handling and configuration validation. Built with Node.js, Playwright, PostgreSQL, Redis, and Docker.
+A robust, production-ready backend service for AI-powered product matching and price monitoring with comprehensive error handling and configuration validation. Built with Node.js, Playwright, PostgreSQL, and Redis.
 
 ## 🚀 Features
 
-- **AI-Powered Product Matching**: Uses OpenAI GPT models for intelligent product attribute extraction and matching
+- **AI-Powered Product Matching**: Uses HuggingFace Router (MiniMaxAI/MiniMax-M2) or OpenAI for intelligent attribute extraction and matching
 - **Web Scraping**: Automated product data extraction using Playwright with browser management
 - **Price Monitoring**: Scheduled price checking with Redis-based job queues
 - **Shopify Integration**: Connect with Shopify stores for product synchronization
@@ -33,8 +33,9 @@ A robust, production-ready backend service for AI-powered product matching and p
 
 ## 📋 Prerequisites
 
-- Docker & Docker Compose
-- Node.js 18+ (for local development)
+- Node.js 18+
+- PostgreSQL 14+ (or a managed Postgres service)
+- Redis 6+ (or a managed Redis service)
 - Git
 
 ## 🛠️ Quick Start
@@ -61,8 +62,10 @@ nano .env
 The server will automatically validate your configuration on startup. The following variables are **required**:
 
 ```env
-# OpenAI Configuration (Required)
-OPENAI_API_KEY=sk-your-openai-api-key-here
+# AI Provider (Required)
+# Provide at least one of the following keys:
+# - OPENAI_API_KEY (for OpenAI)
+# - HUGGINGFACE_API_KEY (for HuggingFace Router)
 
 # Security (Required)
 JWT_SECRET=your-jwt-secret-key-here
@@ -92,30 +95,32 @@ Example validation output:
 ```
 ✅ Environment configuration validated successfully
 ⚠️ LOG_LEVEL not set, using default: info
-❌ OPENAI_API_KEY is required but not provided
+❌ Either OPENAI_API_KEY or HUGGINGFACE_API_KEY is required but not provided
 ```
 
-### 3. Start with Docker
+### 3. Start Locally
+
+Ensure PostgreSQL and Redis are running locally (or use managed services). Then install dependencies and start the API:
 
 ```bash
-# Start all services
-docker-compose up -d
+# Install dependencies
+npm install
 
-# View logs
-docker-compose logs -f
+# Start API server (Node.js watch mode)
+npm run dev
 
-# Start with development tools (pgAdmin, Redis Commander)
-docker-compose --profile dev up -d
+# Start worker (optional, for queues)
+npm run worker:dev
 ```
 
 ### 4. Initialize Database
 
 ```bash
 # Run database migrations
-docker-compose exec backend npx prisma migrate deploy
+npx prisma migrate deploy
 
 # (Optional) Generate Prisma client
-docker-compose exec backend npx prisma generate
+npx prisma generate
 ```
 
 ## 🔧 Configuration
@@ -126,11 +131,21 @@ docker-compose exec backend npx prisma generate
 |----------|-------------|---------|
 | `PORT` | API server port | `4000` |
 | `NODE_ENV` | Environment mode | `development` |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@db:5432/productdb` |
-| `REDIS_URL` | Redis connection string | `redis://redis:6379` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:postgres@localhost:5432/productdb` |
+| `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
 | `MAX_CONCURRENCY` | Maximum concurrent scrapers | `5` |
 | `WORKER_CONCURRENCY` | Worker process concurrency | `3` |
 | `PRICE_CHECK_CRON` | Price check schedule | `0 */6 * * *` (every 6 hours) |
+
+#### AI Provider Options
+
+- OpenAI:
+  - Set `OPENAI_API_KEY`
+  - Optional: `OPENAI_MODEL` (default `gpt-4o-mini`), `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`)
+- HuggingFace Router:
+  - Set `HUGGINGFACE_API_KEY`
+  - Optional: `HUGGINGFACE_CHAT_MODEL` (default `MiniMaxAI/MiniMax-M2`), `HUGGINGFACE_EMBEDDING_MODEL` (default `jinaai/jina-embeddings-v3-base-en`)
+  - Notes: The service uses an OpenAI-compatible API surface to call the router.
 
 ### Cron Schedule Examples
 
@@ -205,49 +220,33 @@ curl -X POST http://localhost:4000/api/queue \
 curl http://localhost:4000/api/queue/status
 ```
 
-## 🐳 Docker Commands
-
-### Basic Operations
+### Test AI Attribute Extraction
 ```bash
-# Start services
-docker-compose up -d
-
-# Stop services
-docker-compose down
-
-# View logs
-docker-compose logs -f [service-name]
-
-# Restart a service
-docker-compose restart [service-name]
-
-# Scale workers
-docker-compose up -d --scale worker=3
+curl -X POST http://localhost:4000/api/dashboard/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Premium 100% Cotton 400 Thread Count Queen Bedding Set",
+    "description": "Luxurious 400 TC Egyptian cotton sheets with breathable weave, queen size, fitted sheet and pillowcases included."
+  }'
 ```
 
-### Development
+## 🧰 Local Development Commands
+
 ```bash
-# Start with development tools
-docker-compose --profile dev up -d
+# Start API server (watch mode)
+npm run dev
 
-# Execute commands in containers
-docker-compose exec backend npm install
-docker-compose exec backend npx prisma studio
+# Start worker (watch mode)
+npm run worker:dev
 
-# Access database
-docker-compose exec db psql -U postgres -d productdb
-```
+# Prisma tools
+npx prisma migrate dev
+npx prisma migrate deploy
+npx prisma generate
+npx prisma studio
 
-### Maintenance
-```bash
-# Remove all containers and volumes
-docker-compose down -v
-
-# Rebuild images
-docker-compose build --no-cache
-
-# View resource usage
-docker-compose top
+# Check health
+curl http://localhost:4000/health
 ```
 
 ## 🔍 Monitoring & Debugging
@@ -257,6 +256,26 @@ docker-compose top
 - **pgAdmin**: http://localhost:8080 (admin@example.com / admin)
 - **Redis Commander**: http://localhost:8081
 - **API Health**: http://localhost:4000/health
+
+### Health Endpoint Details
+The `/health` endpoint reports real-time service status:
+- `status`: `OK` when both DB and Redis are connected, `DEGRADED` otherwise
+- `checks.database`: `connected` or `error`
+- `checks.redis`: `connected` or `error`
+- `uptimeSeconds`: server process uptime
+- `features`: flags indicating enabled subsystems (scraping, upload, dashboard, etc.)
+
+Example response:
+```json
+{
+  "status": "OK",
+  "timestamp": "2024-11-02T12:00:00.000Z",
+  "environment": "development",
+  "uptimeSeconds": 1234,
+  "checks": { "database": "connected", "redis": "connected" },
+  "features": { "scraping": true, "upload": true, "dashboard": true }
+}
+```
 
 ### Logs
 ```bash
@@ -398,5 +417,28 @@ docker-compose restart worker
 # Increase Docker memory limits
 # Edit docker-compose.yml worker service resources
 ```
+
+## ⚙️ Dev Mode Notes
+
+### Auto-Authentication in Development
+When `NODE_ENV=development`, authenticated API routes under `/api` enable a development auto-auth middleware. If no `Authorization` header is present, the server will automatically attach an active admin user (or the first active user) to `req.user`. This is intended solely for local development convenience.
+
+- Applies to routes mounted under `/api`
+- Disabled automatically in production
+- To disable locally, remove the dev auto-auth middleware usage in `server.js` or set `NODE_ENV=production`
+
+### Internal Rate-Limit Bypass
+Rate limiters honor an internal API bypass key for trusted automation:
+- Set `RATE_LIMIT_BYPASS_KEY` in environment
+- Send header `x-internal-api-key: <RATE_LIMIT_BYPASS_KEY>`
+- Requests with a valid key skip rate limiting; use sparingly and never expose this header in client code
+
+### Centralized Error Handling
+Errors are handled by a centralized middleware that produces consistent JSON responses and structured logs. 404s return a `{ success: false, error: 'Not Found' }` payload, while unhandled errors include a generic message and a correlation-friendly log entry.
+
+### Worker and Combined Start
+- `npm run start:all` runs both the API server and worker server with coordinated lifecycles
+- `npm run start:worker` runs only the worker server
+
 
 For more help, check the logs or open an issue in the repository.# webscrapper

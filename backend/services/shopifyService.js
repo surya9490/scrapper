@@ -31,6 +31,30 @@ class ShopifyService {
     return this.shopify !== null;
   }
 
+  // Unified GraphQL client: uses SDK if available, otherwise raw HTTP with access token
+  getGraphqlClient(session) {
+    if (this.shopify) {
+      return new this.shopify.clients.Graphql({ session });
+    }
+
+    // Fallback client with a compatible interface (query returns { body })
+    const endpoint = `https://${session.shop}/admin/api/${LATEST_API_VERSION}/graphql.json`;
+    return {
+      query: async ({ data }) => {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': session.accessToken
+          },
+          body: JSON.stringify(data)
+        });
+        const body = await res.json();
+        return { body };
+      }
+    };
+  }
+
   // Generate OAuth URL for app installation
   generateAuthUrl(shop, state) {
     if (!this.isShopifyAvailable()) {
@@ -161,24 +185,37 @@ class ShopifyService {
 
   // Get active session for a shop
   async getSession(shop) {
-    if (!this.isShopifyAvailable()) {
-      return null;
-    }
     
     try {
+      // Prefer Shopify OAuth Session table when available
+      const sessionRecord = await this.prisma.session.findFirst({
+        where: { shop },
+        orderBy: { expires: 'desc' }
+      });
+
+      if (sessionRecord) {
+        return {
+          id: sessionRecord.id || `offline_${shop}`,
+          shop: sessionRecord.shop,
+          accessToken: sessionRecord.accessToken,
+          scope: sessionRecord.scope || undefined
+        };
+      }
+
+      // Fallback to our ShopifyStore linkage
       const store = await this.prisma.shopifyStore.findUnique({
-        where: { shop: shop, isActive: true }
+        where: { shopDomain: shop }
       });
 
       if (!store) {
-        throw new Error('Shop not found or not active');
+        throw new Error('Shop not found for domain');
       }
 
       return {
-        id: `offline_${shop}`,
-        shop: shop,
+        id: `offline_${store.shopDomain}`,
+        shop: store.shopDomain,
         accessToken: store.accessToken,
-        scope: store.scope
+        scope: undefined
       };
 
     } catch (error) {
@@ -187,15 +224,60 @@ class ShopifyService {
     }
   }
 
+  // Get session based on authenticated user, optionally scoped to a shop domain
+  async getSessionForUser(userId, shopDomain = null) {
+
+    try {
+      // Try OAuth sessions first (Session table stores userId as BigInt)
+      const where = shopDomain
+        ? { userId: BigInt(userId), shop: shopDomain }
+        : { userId: BigInt(userId) };
+
+      const sessionRecord = await this.prisma.session.findFirst({
+        where,
+        orderBy: { expires: 'desc' }
+      });
+
+      if (sessionRecord) {
+        return {
+          id: sessionRecord.id || `offline_${sessionRecord.shop}`,
+          shop: sessionRecord.shop,
+          accessToken: sessionRecord.accessToken,
+          scope: sessionRecord.scope || undefined
+        };
+      }
+
+      // Fallback to ShopifyStore linkage by user
+      const store = await this.prisma.shopifyStore.findFirst({
+        where: shopDomain ? { userId, shopDomain } : { userId },
+        orderBy: { updatedAt: 'desc' }
+      });
+
+      if (!store) {
+        throw new Error('No connected Shopify store found for user');
+      }
+
+      return {
+        id: `offline_${store.shopDomain}`,
+        shop: store.shopDomain,
+        accessToken: store.accessToken,
+        scope: undefined
+      };
+
+    } catch (error) {
+      console.error('Error getting user session:', error);
+      throw error;
+    }
+  }
+
   // Fetch products from Shopify store
   async fetchProducts(shop, options = {}) {
-    if (!this.isShopifyAvailable()) {
-      throw new Error('Shopify API not configured. Please set SHOPIFY_API_KEY and SHOPIFY_API_SECRET.');
-    }
     
     try {
-      const session = await this.getSession(shop);
-      const client = new this.shopify.clients.Graphql({ session });
+      const session = options.userId
+        ? await this.getSessionForUser(options.userId, shop)
+        : await this.getSession(shop);
+      const client = this.getGraphqlClient(session);
 
       const { limit = 50, cursor = null, query = '' } = options;
 
@@ -281,10 +363,12 @@ class ShopifyService {
   }
 
   // Update product price in Shopify
-  async updateProductPrice(shop, variantId, newPrice, compareAtPrice = null) {
+  async updateProductPrice(shop, variantId, newPrice, compareAtPrice = null, options = {}) {
     try {
-      const session = await this.getSession(shop);
-      const client = new this.shopify.clients.Graphql({ session });
+      const session = options.userId
+        ? await this.getSessionForUser(options.userId, shop)
+        : await this.getSession(shop);
+      const client = this.getGraphqlClient(session);
 
       const updateMutation = `
         mutation productVariantUpdate($input: ProductVariantInput!) {
@@ -343,7 +427,7 @@ class ShopifyService {
   // Sync competitor prices to Shopify products
   async syncCompetitorPrices(shop, mappingIds, options = {}) {
     try {
-      const { dryRun = false, priceStrategy = 'match', margin = 0 } = options;
+      const { dryRun = false, priceStrategy = 'match', margin = 0, userId = null } = options;
       
       const mappings = await this.prisma.productMapping.findMany({
         where: {
@@ -383,7 +467,8 @@ class ShopifyService {
           if (!dryRun) {
             // Find Shopify product by SKU
             const shopifyProducts = await this.fetchProducts(shop, {
-              query: `sku:${mapping.userProduct.sku}`
+              query: `sku:${mapping.userProduct.sku}`,
+              userId: userId || mapping.userId
             });
 
             if (shopifyProducts.success && shopifyProducts.products.length > 0) {
@@ -396,7 +481,9 @@ class ShopifyService {
                 const updateResult = await this.updateProductPrice(
                   shop,
                   variant.node.id,
-                  newPrice
+                  newPrice,
+                  null,
+                  { userId: userId || mapping.userId }
                 );
 
                 if (updateResult.success) {
@@ -487,7 +574,7 @@ class ShopifyService {
   async getStoreStatus(shop) {
     try {
       const store = await this.prisma.shopifyStore.findUnique({
-        where: { shop: shop }
+        where: { shopDomain: shop }
       });
 
       if (!store) {
@@ -501,7 +588,7 @@ class ShopifyService {
       // Test connection by making a simple API call
       try {
         const session = await this.getSession(shop);
-        const client = new this.shopify.clients.Graphql({ session });
+        const client = this.getGraphqlClient(session);
 
         const testQuery = `
           query {
@@ -520,13 +607,13 @@ class ShopifyService {
           success: true,
           connected: true,
           store: {
-            shop: store.shop,
-            name: store.name,
-            domain: store.domain,
-            plan: store.plan,
-            currencyCode: store.currencyCode,
-            lastConnectedAt: store.lastConnectedAt,
-            isActive: store.isActive
+            shopDomain: store.shopDomain,
+            storeName: store.storeName,
+            storeEmail: store.storeEmail,
+            currency: store.currency,
+            timezone: store.timezone,
+            updatedAt: store.updatedAt,
+            isActive: true
           }
         };
 
@@ -542,9 +629,9 @@ class ShopifyService {
           connected: false,
           error: 'API connection failed - token may be invalid',
           store: {
-            shop: store.shop,
-            name: store.name,
-            lastConnectedAt: store.lastConnectedAt,
+            shopDomain: store.shopDomain,
+            storeName: store.storeName,
+            updatedAt: store.updatedAt,
             isActive: false
           }
         };
@@ -564,7 +651,7 @@ class ShopifyService {
   async disconnectStore(shop) {
     try {
       await this.prisma.shopifyStore.update({
-        where: { shop: shop },
+        where: { shopDomain: shop },
         data: {
           isActive: false,
           accessToken: null

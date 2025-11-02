@@ -167,7 +167,7 @@ class WorkerServer {
               material: result.material || null,
               size: result.size || null,
               color: result.color || null,
-              threadCount: result.threadCount || null,
+              threadCount: result.threadCount != null ? String(result.threadCount) : null,
               design: result.design || null,
               competitorDomain: domain,
               competitorName: domain,

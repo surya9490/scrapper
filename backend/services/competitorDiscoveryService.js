@@ -1,6 +1,5 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import prisma from '../utils/prisma.js';
 import AIService from './aiService.js';
 import { URL } from 'url';
 

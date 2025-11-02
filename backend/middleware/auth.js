@@ -254,8 +254,10 @@ export const devAutoAuth = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader) {
     try {
-      const adminUser = await prisma.user.findUnique({
-        where: { email: 'admin@scrapper.dev' },
+      // Prefer an active admin, otherwise fallback to first active user
+      let user = await prisma.user.findFirst({
+        where: { isActive: true, role: 'admin' },
+        orderBy: { createdAt: 'asc' },
         select: {
           id: true,
           email: true,
@@ -268,9 +270,26 @@ export const devAutoAuth = async (req, res, next) => {
         }
       });
 
-      if (adminUser && adminUser.isActive) {
-        req.user = adminUser;
-        console.log('🔓 Development mode: Auto-authenticated as admin');
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: { isActive: true },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            email: true,
+            username: true,
+            role: true,
+            dashboardRateLimit: true,
+            scrapingRateLimit: true,
+            uploadRateLimit: true,
+            isActive: true
+          }
+        });
+      }
+
+      if (user) {
+        req.user = user;
+        console.log(`🔓 Development mode: Auto-authenticated as ${user.role || 'user'} (${user.email})`);
       }
     } catch (error) {
       console.error('Dev auto-auth error:', error);

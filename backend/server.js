@@ -11,6 +11,9 @@ import { disconnectPrisma } from './utils/prisma.js';
 import { initializeRedis, disconnectRedis, getRedisClient } from './utils/redis.js';
 import { closeCluster } from './scraper/cluster.js';
 import { getConfig, logConfigurationStatus } from './utils/config.js';
+import prisma from './utils/prisma.js';
+import { testRedisConnection } from './utils/redis.js';
+import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 // Import new routes
 import uploadRouter from './routes/upload.js';
@@ -97,22 +100,42 @@ if (config.nodeEnv === 'development') {
 // Load user rate limits for authenticated requests
 app.use('/api', loadUserRateLimits);
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'production',
-    redis: getRedisClient().status,
-    features: {
-      scraping: true,
-      upload: true,
-      dashboard: true,
-      priceMonitoring: true,
-      shopifyIntegration: true,
-      aiMatching: true
+// Health check endpoint with DB/Redis checks
+app.get('/health', async (req, res) => {
+  try {
+    const started = process.uptime();
+    const redisOk = await testRedisConnection();
+    let dbOk = false;
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      dbOk = true;
+    } catch (e) {
+      dbOk = false;
     }
-  });
+
+    const statusCode = redisOk && dbOk ? 200 : 503;
+    res.status(statusCode).json({
+      status: redisOk && dbOk ? 'OK' : 'DEGRADED',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'production',
+      uptimeSeconds: Math.round(started),
+      checks: {
+        database: dbOk ? 'connected' : 'error',
+        redis: redisOk ? 'connected' : 'error',
+      },
+      features: {
+        scraping: true,
+        upload: true,
+        dashboard: true,
+        priceMonitoring: true,
+        shopifyIntegration: true,
+        aiMatching: true
+      }
+    });
+  } catch (error) {
+    logger.error('Health check failed', { error: error.message });
+    res.status(503).json({ status: 'ERROR', error: 'Health check failed' });
+  }
 });
 
 // API Routes with user-specific rate limiting
@@ -125,6 +148,10 @@ app.use("/api/price-monitoring", authenticateToken, dashboardUserLimiter, priceM
 app.use("/api/shopify", shopifyRouter);
 app.use("/api/cron-jobs", cronJobsRouter);
 app.use("/api/optimization", authenticateToken, dashboardUserLimiter, optimizationRouter);
+
+// 404 and error handling
+app.use(notFound);
+app.use(errorHandler);
 
 // Start server
 async function startServer() {

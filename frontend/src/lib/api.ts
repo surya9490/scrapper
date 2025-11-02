@@ -309,8 +309,8 @@ export const apiService = {
   upload: {
     uploadCsv: (file: File) => {
       const formData = new FormData();
-      formData.append('file', file);
-      return api.post('/upload/csv', formData, {
+      formData.append('csvFile', file);
+      return api.post('/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -319,9 +319,9 @@ export const apiService = {
     
     uploadCsvWithMonitoring: (file: File, monitoringType: string = 'basic') => {
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('csvFile', file);
       formData.append('monitoringType', monitoringType);
-      return api.post('/upload/csv', formData, {
+      return api.post('/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },

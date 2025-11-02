@@ -8,13 +8,14 @@ import RetryHandler from '../utils/retryHandler.js';
 import CacheService from '../utils/cacheService.js';
 import ProxyRotation from '../utils/proxyRotation.js';
 import BatchJobService from '../utils/batchJobService.js';
+import { extractFromSuggestJson, extractProductsFromSearchPage } from '../utils/extractSearch.js';
 
 class ScrapingService {
   constructor() {
     this.aiService = new AIService();
     this.browser = null;
     this.timeout = 30000;
-    
+
     // Initialize optimization utilities
     this.domainThrottler = new DomainThrottler();
     this.circuitBreaker = new CircuitBreaker();
@@ -29,12 +30,12 @@ class ScrapingService {
       try {
         // Get proxy configuration
         const proxy = await this.proxyRotation.getNextProxy();
-        
+
         const launchOptions = {
           headless: true,
           timeout: this.timeout,
           args: [
-            '--no-sandbox', 
+            '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu'
@@ -123,14 +124,14 @@ class ScrapingService {
           'Upgrade-Insecure-Requests': '1',
         }
       });
-      
+
       page = await context.newPage();
-      
+
       logger.info('Starting product scrape', { url, proxy: proxy?.id });
-      
-      await page.goto(url, { 
+
+      await page.goto(url, {
         waitUntil: 'networkidle',
-        timeout: this.timeout 
+        timeout: this.timeout
       });
 
       // Wait for content to load
@@ -141,7 +142,7 @@ class ScrapingService {
 
       // Extract basic product information
       const productData = await this.extractProductData($, url);
-      
+
       // Use AI to extract additional attributes
       const aiAttributes = await this.aiService.extractAttributes(
         productData.title,
@@ -158,19 +159,19 @@ class ScrapingService {
 
       // Cache the result
       await this.cacheService.set(cacheKey, enhancedProduct, 'product');
-      
+
       // Record success for circuit breaker
       this.circuitBreaker.recordSuccess(domain);
-      
+
       // Record proxy completion
       if (proxy) {
         await this.proxyRotation.recordCompletion(proxy.id);
       }
-      
-      logger.info('Product scrape completed successfully', { 
-        url, 
+
+      logger.info('Product scrape completed successfully', {
+        url,
         hasTitle: !!productData.title,
-        hasPrice: !!productData.price 
+        hasPrice: !!productData.price
       });
 
       return enhancedProduct;
@@ -178,15 +179,15 @@ class ScrapingService {
     } catch (error) {
       // Record failure for circuit breaker
       this.circuitBreaker.recordFailure(domain);
-      
+
       // Record proxy failure
       if (proxy) {
         await this.proxyRotation.recordFailure(proxy.id, error.message);
       }
 
-      logger.error('Product scrape failed', { 
-        url, 
-        error: error.message 
+      logger.error('Product scrape failed', {
+        url,
+        error: error.message
       });
 
       throw error;
@@ -298,11 +299,11 @@ class ScrapingService {
   // Parse price from text
   parsePrice(priceText) {
     if (!priceText) return null;
-    
+
     // Remove currency symbols and extract number
     const cleanPrice = priceText.replace(/[^\d.,]/g, '');
     const price = parseFloat(cleanPrice.replace(',', ''));
-    
+
     return isNaN(price) ? null : price;
   }
 
@@ -377,11 +378,20 @@ class ScrapingService {
     return null;
   }
 
+
   // Search for products on competitor sites
-  async searchCompetitorSite(domain, searchKeywords) {
+  async searchCompetitorSite(urlsOrDomain, keywordOrKeywords) {
+    const isArrayInput = Array.isArray(urlsOrDomain);
+    const normalizedInput = !isArrayInput && typeof urlsOrDomain === 'string'
+      ? (urlsOrDomain.startsWith('http') ? urlsOrDomain : `https://${urlsOrDomain}`)
+      : null;
+    const maxResults = 20;
+    const keyword = Array.isArray(keywordOrKeywords) ? (keywordOrKeywords[0] || '') : (keywordOrKeywords || '');
+    const normalizeUrl = (u) => (u && u.startsWith('http')) ? u : (u ? `https://${u}` : u);
     const browser = await this.initBrowser();
     let context = null;
     let page = null;
+    const results = [];
 
     try {
       // Create browser context with user agent
@@ -389,36 +399,103 @@ class ScrapingService {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         viewport: { width: 1920, height: 1080 }
       });
-      
+
       page = await context.newPage();
 
-      // Common search URL patterns
-      const searchUrls = {
-        'amazon.com': `https://www.amazon.com/s?k=${encodeURIComponent(searchKeywords.join(' '))}`,
-        'ebay.com': `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(searchKeywords.join(' '))}`,
-        'walmart.com': `https://www.walmart.com/search?q=${encodeURIComponent(searchKeywords.join(' '))}`,
-        'target.com': `https://www.target.com/s?searchTerm=${encodeURIComponent(searchKeywords.join(' '))}`
-      };
+      // Build candidate URLs from input (array of URLs or domain)
+      let candidates = [];
+      if (isArrayInput) {
+        candidates = urlsOrDomain.map(normalizeUrl).filter(Boolean);
+      } else if (normalizedInput) {
+        candidates = [
+          `${normalizedInput}/search?q=${encodeURIComponent(keyword)}`,
+          `${normalizedInput}/search?type=product&q=${encodeURIComponent(keyword)}`,
+          `${normalizedInput}/collections/all?q=${encodeURIComponent(keyword)}`,
+          `${normalizedInput}/search/suggest.json?q=${encodeURIComponent(keyword)}`,
+          `${normalizedInput}/search/suggest?q=${encodeURIComponent(keyword)}`
+        ];
+      }
 
-      const searchUrl = searchUrls[domain] || `https://${domain}/search?q=${encodeURIComponent(searchKeywords.join(' '))}`;
+      let searchUrl = null;
+      for (const candidate of candidates) {
+        if (await page.goto(candidate, {
+          waitUntil: 'networkidle',
+          timeout: 30000
+        })) {
+          searchUrl = candidate;
+          break;
+        }
+      }
 
-      await page.goto(searchUrl, { 
-        waitUntil: 'networkidle',
-        timeout: 30000 
-      });
+      if (!searchUrl) {
+        logger.error('No valid search URL found for input');
+        return [];
+      }
+
+      for (const url of candidates) {
+        const res = await page.goto(url, {
+          waitUntil: 'networkidle',
+          timeout: 30000
+        });
+        if (!res || res.status() >= 400) continue;
+        const ct = res.headers()['content-type'] || '';
+        if (ct.includes('application/json') || page.url().endsWith('.json')) {
+          const body = await res.text();
+          const json = JSON.parse(body);
+          const items = extractFromSuggestJson(json);
+          for (const i of items) {
+            results.push(i);
+            if (results.length >= maxResults) break;
+          }
+          if (results.length) return results;
+        }
+        const found = await extractProductsFromSearchPage(page, maxResults - results.length);
+        if (found && found.length) {
+          results.push(...found);
+          if (results.length >= maxResults) return results;
+        }
+
+        // 2) Fallback: load homepage and use visible search form (type into input and submit)
+        await page.goto(normalizedInput || candidates[0], { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => { });
+        // find search input heuristically
+        const searchSelectors = [
+          'input[type="search"]', 'input[name="q"]', 'input[aria-label*="search"]',
+          'input[placeholder*="Search"]', 'form[action*="/search"] input'
+        ];
+        for (const sel of searchSelectors) {
+          if (await page.$(sel)) {
+            await page.fill(sel, keyword);
+            await Promise.all([
+              page.press(sel, 'Enter'),
+              
+              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => { })
+            ]);
+            const found = await extractProductsFromSearchPage(page, maxResults - results.length);
+            if (found && found.length) {
+              results.push(...found);
+              if (results.length >= maxResults) break;
+            }
+          }
+        }
+      }
+
+
+
 
       await page.waitForTimeout(3000);
 
       const content = await page.content();
       const $ = cheerio.load(content);
 
+      const currentDomain = (() => { try { const u = new URL(page.url()); return u.hostname.replace(/^www\./, ''); } catch { return null; } })();
+
       // Extract product links from search results
-      const productLinks = this.extractProductLinks($, domain);
+      const productLinks = currentDomain ? this.extractProductLinks($, currentDomain) : [];
 
       return productLinks.slice(0, 10); // Return top 10 results
 
     } catch (error) {
-      console.error(`Error searching ${domain}:`, error);
+      console.error('Error searching competitor sites:', error);
       return [];
     } finally {
       if (page) {
@@ -458,10 +535,10 @@ class ScrapingService {
         if (!href.startsWith('http')) {
           href = `https://${domain}${href.startsWith('/') ? '' : '/'}${href}`;
         }
-        
+
         // Extract title if available
         const title = $(element).text().trim() || $(element).attr('title') || '';
-        
+
         links.push({
           url: href,
           title: title
@@ -516,7 +593,7 @@ class ScrapingService {
       // Process URLs in batches to avoid overwhelming the target site
       for (let i = 0; i < domainUrls.length; i += concurrency) {
         const batch = domainUrls.slice(i, i + concurrency);
-        
+
         const batchPromises = batch.map(async (url) => {
           try {
             const product = await this.scrapeProduct(url);
@@ -527,7 +604,7 @@ class ScrapingService {
         });
 
         const batchResults = await Promise.all(batchPromises);
-        
+
         batchResults.forEach(result => {
           if (result.success) {
             results.push(result.data);

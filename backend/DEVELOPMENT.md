@@ -1,116 +1,108 @@
-# 🔥 Development Guide - Nodemon with Docker
+# 🔥 Development Guide — Local (Node.js & Nodemon)
 
-This guide shows you how to run nodemon along with Docker for hot reloading during development.
+This guide shows you how to run the backend locally with hot reloading using Node.js watch mode or Nodemon. No Docker required.
 
 ## 🚀 Quick Start
 
-### Option 1: Development Mode with Nodemon (Recommended)
+### Option 1: Node.js Watch Mode (Recommended)
 
 ```bash
-# Start development environment with hot reloading
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Start API server with watch
+npm run dev
 
-# Or run in background
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-
-# Watch logs
-docker compose logs -f backend worker
+# Start worker with watch
+npm run dev:all   # starts API + queues via start-all.js
+npm run worker:dev
 ```
 
-### Option 2: Production Mode (No Hot Reloading)
+### Option 2: Nodemon (Debugging-friendly)
 
 ```bash
-# Standard production setup
-docker compose up -d
+# Run API with Nodemon + inspector (port 9229)
+npm run dev:nodemon
 
-# Watch logs
-docker compose logs -f backend worker
+# Run worker with Nodemon
+npm run worker:dev
 ```
 
 ## 📁 Development Files
 
-### New Files Added:
-- **`Dockerfile.dev`** - Development Dockerfile with dev dependencies
-- **`docker-compose.dev.yml`** - Development override configuration
-- **`DEVELOPMENT.md`** - This guide
-
-### Updated Files:
-- **`package.json`** - Added nodemon scripts
-- **`docker-commands.md`** - Added development commands section
+Key files relevant to local development:
+- **`server.js`** — API server entrypoint
+- **`start-all.js`** — Starts API, queues, and scheduled jobs
+- **`worker-server.js`** — Worker entrypoint for BullMQ
+- **`scraper/worker.js`** — Scrape/price monitoring job processors
+- **`package.json`** — Scripts for dev/watch modes
 
 ## 🛠️ Available Scripts
 
 | Script | Description |
 |--------|-------------|
-| `npm run dev:nodemon` | Run backend with nodemon |
-| `npm run worker:dev` | Run worker with nodemon |
-| `npm run dev` | Run with Node.js built-in watch mode |
+| `npm run dev` | API via Node.js built-in watch mode |
+| `npm run dev:nodemon` | API via Nodemon + inspector (9229) |
+| `npm run dev:all` | Start API + queues via `start-all.js` |
+| `npm run worker` | Run worker (no watch) |
+| `npm run worker:dev` | Run worker with Nodemon |
 | `npm start` | Production start |
 
 ## 🔧 Development Features
 
-### ✅ What Works:
-- **Hot Reloading** - File changes automatically restart services
-- **Volume Mounting** - Your local code is mounted into containers
-- **Debug Port** - Port 9229 exposed for debugging
-- **Development Dependencies** - Nodemon and other dev tools available
-- **Environment Variables** - `NODE_ENV=development` set automatically
+### ✅ What’s Included:
+- **Hot Reloading** — File changes automatically restart services
+- **Debug Port** — Inspector on port 9229 when using `dev:nodemon`
+- **Environment Variables** — `NODE_ENV=development` for dev scripts
+
+### Dev Auto-Auth and Rate-Limit Bypass
+- **Dev Auto-Auth**: In development, authenticated `/api` routes auto-attach an active admin user if no `Authorization` header is present. This accelerates local testing without logging in. Disabled in production.
+- **Rate-Limit Bypass**: Set `RATE_LIMIT_BYPASS_KEY` and send `x-internal-api-key` header with the same value to skip rate limiting for trusted tools. Do not use this in public clients.
 
 ### 🎯 Benefits:
-- **Fast Development** - No need to rebuild containers for code changes
-- **Consistent Environment** - Same Docker environment as production
-- **Easy Debugging** - Debug port available for IDE integration
-- **Isolated Dependencies** - Dev dependencies only in development containers
+- **Fast Iteration** — No containers to rebuild, quick reloads
+- **Easy Debugging** — Attach IDE to inspector port 9229
+- **Simple Setup** — Run everything locally with Node.js
 
 ## 📋 Development Workflow
 
-### 1. Start Development Environment
+### 1. Prepare Services
+- Ensure PostgreSQL and Redis are running locally
+- Copy env: `cp .env.example .env` and set required values
+- Initialize DB: `npx prisma migrate dev` (or `db:deploy`)
+
+### 2. Start Servers
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# API server
+npm run dev      # or: npm run dev:nodemon
+
+# Worker (queues)
+npm run worker:dev
 ```
 
-### 2. Make Code Changes
-- Edit any `.js` file in your project
-- Nodemon will automatically detect changes
-- Services restart automatically
-
-### 3. View Logs
-```bash
-# All services
-docker compose logs -f
-
-# Specific service
-docker compose logs -f backend
-docker compose logs -f worker
-```
-
-### 4. Test Your Changes
+### 3. Test Your Changes
 ```bash
 curl http://localhost:4000/health
-curl http://localhost:4000/api/scrape
 curl http://localhost:4000/api/queue/status
+curl -H "x-internal-api-key: $RATE_LIMIT_BYPASS_KEY" http://localhost:4000/api/queue/status
 ```
 
-### 5. Stop Development Environment
-```bash
-docker compose down
-```
+### 4. View Logs
+- API logs appear in the same terminal
+- Worker logs appear where started
+- Prisma Studio: `npx prisma studio`
 
 ## 🐛 Debugging
 
 ### Enable Node.js Debugging
-The development setup exposes port 9229 for debugging. You can connect your IDE:
+When using `npm run dev:nodemon`, the inspector on port 9229 is available for debugging. You can connect your IDE:
 
 **VS Code Launch Configuration:**
 ```json
 {
   "type": "node",
   "request": "attach",
-  "name": "Docker: Attach to Node",
+  "name": "Attach to Node (Local)",
   "port": 9229,
   "address": "localhost",
   "localRoot": "${workspaceFolder}",
-  "remoteRoot": "/app",
   "protocol": "inspector"
 }
 ```
@@ -119,81 +111,55 @@ The development setup exposes port 9229 for debugging. You can connect your IDE:
 
 | Issue | Solution |
 |-------|----------|
-| Nodemon not found | Use `docker-compose.dev.yml` which includes dev dependencies |
-| Changes not detected | Ensure volume mounting is working: `- .:/app` |
+| Nodemon not found | `npm install --save-dev nodemon` (or use `npm run dev`) |
+| Changes not detected | Use Node `--watch` (`npm run dev`) or Nodemon |
 | Port conflicts | Check if port 4000 or 9229 are already in use |
-| Permission errors | Rebuild with `--no-cache` flag |
+| Prisma errors | Ensure `DATABASE_URL` is correct and DB reachable |
 
 ## 🔄 Alternative Approaches
 
-### Option A: Nodemon Inside Container (Current Setup)
-- ✅ Consistent environment
-- ✅ Easy to share with team
-- ✅ Production-like setup
-- ❌ Slightly slower startup
-
-### Option B: Nodemon on Host Machine
+### Option A: Node.js Built-in Watch Mode
 ```bash
-# Install nodemon globally on your machine
-npm install -g nodemon
-
-# Start only database services
-docker compose up -d db redis
-
-# Run backend locally with nodemon
-nodemon server.js
-
-# Run worker locally
-nodemon scraper/worker.js
+npm run dev
 ```
 
-### Option C: Node.js Built-in Watch Mode
+### Option B: Nodemon
 ```bash
-# Use Node.js --watch flag (Node 18.11+)
-npm run dev
+npm run dev:nodemon
+npm run worker:dev
 ```
 
 ## 📊 Performance Comparison
 
 | Method | Startup Time | Hot Reload Speed | Resource Usage |
 |--------|--------------|------------------|----------------|
-| Docker + Nodemon | ~30s | ~2-3s | Medium |
-| Local Nodemon | ~5s | ~1-2s | Low |
 | Node --watch | ~3s | ~1s | Low |
-| Docker Production | ~25s | No reload | Medium |
+| Nodemon | ~5s | ~1-2s | Low |
 
 ## 🎯 Recommendations
 
 ### For Development:
-- Use **Docker + Nodemon** for team consistency
-- Use **Local Nodemon** for fastest iteration
 - Use **Node --watch** for minimal setup
+- Use **Nodemon** for debugging with inspector
 
 ### For Production:
-- Always use standard Docker setup
-- Never include dev dependencies
-- Use proper environment variables
+- Use `npm start` with proper environment variables
+- Do not use watch modes or Nodemon
 
 ## 🔗 Useful Commands
 
 ```bash
-# Quick development start
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Start API server
+npm run dev
 
-# Watch all logs
-docker compose logs -f
+# Start worker
+npm run worker:dev
 
-# Restart specific service
-docker compose restart backend
-
-# Access container shell
-docker compose exec backend bash
-
-# Check container status
-docker compose ps
-
-# Stop everything
-docker compose down
+# Prisma
+npx prisma migrate dev
+npx prisma migrate deploy
+npx prisma generate
+npx prisma studio
 ```
 
 ## 🚀 Next Steps
@@ -206,4 +172,4 @@ docker compose down
 
 ---
 
-Happy coding! 🎉 Your development environment is now ready with hot reloading support.
+Happy coding! 🎉 Your local development environment is now ready with hot reloading support.

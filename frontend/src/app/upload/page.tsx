@@ -351,7 +351,7 @@ export default function UploadPage() {
                           {batch.filename}
                         </div>
                         <div className="text-sm text-gray-500">
-                          ID: {batch.id.substring(0, 8)}...
+                          ID: {String(batch.id).substring(0, 8)}...
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">

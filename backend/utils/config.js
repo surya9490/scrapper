@@ -6,7 +6,6 @@ const REQUIRED_ENV_VARS = {
   PORT: 'Server port number',
   DATABASE_URL: 'PostgreSQL database connection string',
   REDIS_URL: 'Redis connection string for caching and queues',
-  OPENAI_API_KEY: 'OpenAI API key for AI services',
   JWT_SECRET: 'Secret key for JWT token signing',
   CORS_ORIGIN: 'Allowed CORS origins (comma-separated for multiple)'
 };
@@ -36,6 +35,14 @@ export function validateEnvironment() {
     if (!process.env[key]) {
       missing.push({ key, description });
     }
+  }
+
+  // AI key validation: require at least one of OPENAI_API_KEY or HUGGINGFACE_API_KEY
+  if (!process.env.OPENAI_API_KEY && !process.env.HUGGINGFACE_API_KEY) {
+    missing.push({
+      key: 'OPENAI_API_KEY | HUGGINGFACE_API_KEY',
+      description: 'At least one AI API key is required (OpenAI or HuggingFace)'
+    });
   }
 
   // Check optional variables and set defaults
@@ -118,6 +125,7 @@ export function getConfig() {
     
     // External services
     openaiApiKey: process.env.OPENAI_API_KEY || process.env.HUGGINGFACE_API_KEY,
+    huggingfaceApiKey: process.env.HUGGINGFACE_API_KEY,
     jwtSecret: process.env.JWT_SECRET,
     
     // Security configuration
@@ -150,7 +158,8 @@ export function logConfigurationStatus() {
       port: config.port,
       redisConfigured: !!config.redisUrl,
       databaseConfigured: !!config.databaseUrl,
-      openaiConfigured: !!config.openaiApiKey
+      openaiConfigured: !!process.env.OPENAI_API_KEY,
+      huggingfaceConfigured: !!process.env.HUGGINGFACE_API_KEY
     });
   } else {
     logger.error('Environment configuration validation failed', {
