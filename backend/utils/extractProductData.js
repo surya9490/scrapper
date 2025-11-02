@@ -26,7 +26,7 @@ export function extractProductData(html, url) {
   let product = { title: null, price: null, image: null };
 
   // ---------- 1️⃣ Parse JSON-LD structured data ----------
-  $('script[type="application/json"]').each((_, el) => {
+  $('script[type="application/ld+json"], script[type="application/json"]').each((_, el) => {
     try {
       const jsonText = $(el).html().trim();
       if (!jsonText) return;
@@ -55,14 +55,16 @@ export function extractProductData(html, url) {
     }
   });
 
-  // ---------- 2️⃣ Try Open Graph meta tags ----------
+  // ---------- 2️⃣ Try Open Graph and meta tags ----------
   if (!product.title)
     product.title = $('meta[property="og:title"]').attr("content");
   if (!product.image)
     product.image = $('meta[property="og:image"]').attr("content");
   if (!product.price)
     product.price = parseFloat(
-      $('meta[property="product:price:amount"]').attr("content")
+      $('meta[property="product:price:amount"]').attr("content") ||
+      $("meta[itemprop='price']").attr("content") ||
+      $('[itemprop="price"]').attr('content')
     );
 
   // ---------- 3️⃣ Fallback selectors ----------
@@ -89,6 +91,10 @@ export function extractProductData(html, url) {
         '[data-testid*="title"]',
         ".product-title",
         "[class*='product__title']",
+        // IKEA-specific
+        '.pip-header-section__title',
+        'h1.pip-header-section__title',
+        '[data-product-name]'
       ]) || $("title").text().trim();
 
   if (!product.price) {
@@ -100,6 +106,9 @@ export function extractProductData(html, url) {
       ".product-price",
       ".amount",
       ".sale-price",
+      // IKEA-specific
+      '.pip-price__value',
+      '[data-price]'
     ]);
     if (priceText) {
       const clean = priceText.replace(/[₹$€£,\sA-Za-z]/g, "");
@@ -114,6 +123,9 @@ export function extractProductData(html, url) {
         ".product-image img",
         "img[data-src]",
         "img",
+        // IKEA-specific
+        '.pip-media-grid__image img',
+        '.pip-media-grid__gallery img'
       ],
       "src"
     );

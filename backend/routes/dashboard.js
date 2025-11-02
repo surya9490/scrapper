@@ -3,11 +3,13 @@ import prisma from '../utils/prisma.js';
 import MatchingService from '../services/matchingService.js';
 import ScrapingService from '../services/scrapingService.js';
 import AIService from '../services/aiService.js';
+import PriceMonitoringService from '../services/priceMonitoringService.js';
 
 const router = express.Router();
 const aiService = new AIService();
 const scrapingService = new ScrapingService();
 const matchingService = new MatchingService();
+const priceMonitoringService = new PriceMonitoringService();
 
 // GET /api/dashboard/overview - Dashboard overview statistics
 router.get('/overview', async (req, res) => {
@@ -103,7 +105,12 @@ router.get('/products', async (req, res) => {
     const where = { userId };
     
     if (status) {
-      where.status = status;
+      const normalized = String(status).toLowerCase();
+      if (["approved", "pending", "rejected"].includes(normalized)) {
+        where.productMappings = { some: { userId, status: normalized } };
+      } else if (normalized === "unmapped") {
+        where.productMappings = { none: { userId } };
+      }
     }
     
     if (search) {
@@ -176,7 +183,7 @@ router.get('/mappings', async (req, res) => {
     }
     
     if (confidence) {
-      where.confidence = { gte: parseFloat(confidence) };
+      where.matchingScore = { gte: parseFloat(confidence) };
     }
 
     const [mappings, total] = await Promise.all([
@@ -266,10 +273,10 @@ router.post('/find-matches', async (req, res) => {
     }
 
     const userProduct = await prisma.userProduct.findUnique({
-      where: { id: userProductId, userId }
+      where: { id: userProductId }
     });
 
-    if (!userProduct) {
+    if (!userProduct || userProduct.userId !== userId) {
       return res.status(404).json({
         success: false,
         error: 'User product not found'
@@ -287,7 +294,7 @@ router.post('/find-matches', async (req, res) => {
     
     for (const domain of competitorDomains) {
       try {
-        const searchResults = await scrapingService.searchCompetitorSite(domain, keywords);
+        const searchResults = await scrapingService.searchCompetitorSite(domain, keywords, userProduct.title);
         
         // Scrape top results
         const scrapedProducts = await scrapingService.batchScrapeProducts(
@@ -300,20 +307,19 @@ router.post('/find-matches', async (req, res) => {
           const competitorProduct = await prisma.competitorProduct.create({
             data: {
               userId,
-              title: product.title,
+              title: product.title || `Product from ${domain}`,
               url: product.sourceUrl,
-              price: product.price,
-              image: product.image,
-              description: product.description,
-              brand: product.brand,
-              category: product.category,
-              material: product.material,
-              size: product.size,
-              color: product.color,
-              availability: product.availability || 'UNKNOWN',
-              rating: product.rating,
-              reviewCount: product.reviewCount,
-              domain: domain,
+              price: product.price ?? null,
+              image: product.image ?? null,
+              brand: product.brand ?? null,
+              category: product.category ?? null,
+              threadCount: product.threadCount ?? null,
+              material: product.material ?? null,
+              size: product.size ?? null,
+              design: product.design ?? null,
+              color: product.color ?? null,
+              competitorDomain: domain.replace(/^www\./, ''),
+              competitorName: null,
               lastScrapedAt: new Date()
             }
           });
@@ -339,9 +345,10 @@ router.post('/find-matches', async (req, res) => {
           userId,
           userProductId: userProductId,
           competitorProductId: match.competitorProduct.id,
-          confidence: match.confidence,
-          matchScore: match.matchScore,
-          status: 'PENDING'
+          matchingScore: match.matchScore.totalScore,
+          matchingAlgorithm: 'composite_similarity',
+          matchingDetails: JSON.stringify(match.matchScore),
+          status: 'pending'
         }
       });
     }
@@ -373,14 +380,14 @@ router.post('/mappings/:id/approve', async (req, res) => {
     const { notes } = req.body;
 
     const mapping = await prisma.productMapping.findUnique({
-      where: { id: parseInt(id), userId },
+      where: { id: parseInt(id) },
       include: {
         userProduct: true,
         competitorProduct: true
       }
     });
 
-    if (!mapping) {
+    if (!mapping || mapping.userId !== userId) {
       return res.status(404).json({
         success: false,
         error: 'Product mapping not found'
@@ -389,7 +396,7 @@ router.post('/mappings/:id/approve', async (req, res) => {
 
     // Update mapping status
     const updatedMapping = await prisma.productMapping.update({
-      where: { id: parseInt(id), userId },
+      where: { id: parseInt(id) },
       data: {
         status: 'approved',
         reviewedAt: new Date(),
@@ -401,11 +408,7 @@ router.post('/mappings/:id/approve', async (req, res) => {
       }
     });
 
-    // Update user product status
-    await prisma.userProduct.update({
-      where: { id: mapping.userProductId, userId },
-      data: { status: 'MAPPED' }
-    });
+    // Optional: could update related monitoring settings here if needed
 
     res.json({
       success: true,
@@ -422,6 +425,46 @@ router.post('/mappings/:id/approve', async (req, res) => {
   }
 });
 
+// POST /api/dashboard/mappings/:id/approve-and-monitor - Approve and start monitoring
+router.post('/mappings/:id/approve-and-monitor', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+    const { notes, schedule = 'daily' } = req.body;
+
+    const mapping = await prisma.productMapping.findUnique({
+      where: { id: parseInt(id) },
+      include: { userProduct: true, competitorProduct: true }
+    });
+
+    if (!mapping || mapping.userId !== userId) {
+      return res.status(404).json({ success: false, error: 'Product mapping not found' });
+    }
+
+    const updatedMapping = await prisma.productMapping.update({
+      where: { id: parseInt(id) },
+      data: { status: 'approved', reviewedAt: new Date(), reviewNotes: notes || null },
+      include: { userProduct: true, competitorProduct: true }
+    });
+
+    // Schedule monitoring immediately after approval
+    const scheduleResult = await priceMonitoringService.schedulePriceMonitoring(parseInt(id), schedule);
+
+    res.json({
+      success: true,
+      data: {
+        mapping: updatedMapping,
+        monitoring: scheduleResult
+      },
+      message: 'Product mapping approved and monitoring scheduled'
+    });
+
+  } catch (error) {
+    console.error('Error approving and scheduling monitoring:', error);
+    res.status(500).json({ success: false, error: 'Failed to approve mapping and schedule monitoring' });
+  }
+});
+
 // POST /api/dashboard/mappings/:id/reject - Reject a product mapping
 router.post('/mappings/:id/reject', async (req, res) => {
   try {
@@ -430,10 +473,10 @@ router.post('/mappings/:id/reject', async (req, res) => {
     const { reason } = req.body;
 
     const mapping = await prisma.productMapping.findUnique({
-      where: { id: parseInt(id), userId }
+      where: { id: parseInt(id) }
     });
 
-    if (!mapping) {
+    if (!mapping || mapping.userId !== userId) {
       return res.status(404).json({
         success: false,
         error: 'Product mapping not found'
@@ -442,11 +485,11 @@ router.post('/mappings/:id/reject', async (req, res) => {
 
     // Update mapping status
     const updatedMapping = await prisma.productMapping.update({
-      where: { id: parseInt(id), userId },
+      where: { id: parseInt(id) },
       data: {
-        status: 'REJECTED',
-        rejectedAt: new Date(),
-        notes: reason || null
+        status: 'rejected',
+        reviewedAt: new Date(),
+        reviewNotes: reason || null
       },
       include: {
         userProduct: true,
@@ -476,10 +519,10 @@ router.delete('/mappings/:id', async (req, res) => {
     const { id } = req.params;
 
     const mapping = await prisma.productMapping.findUnique({
-      where: { id: parseInt(id), userId }
+      where: { id: parseInt(id) }
     });
 
-    if (!mapping) {
+    if (!mapping || mapping.userId !== userId) {
       return res.status(404).json({
         success: false,
         error: 'Product mapping not found'
@@ -487,7 +530,7 @@ router.delete('/mappings/:id', async (req, res) => {
     }
 
     await prisma.productMapping.delete({
-      where: { id: parseInt(id), userId }
+      where: { id: parseInt(id) }
     });
 
     res.json({
@@ -516,11 +559,11 @@ router.get('/price-history/:competitorProductId', async (req, res) => {
 
     // First verify the competitor product belongs to the user
     const competitorProduct = await prisma.competitorProduct.findUnique({
-      where: { id: parseInt(competitorProductId), userId },
-      select: { title: true, url: true, currentPrice: true }
+      where: { id: parseInt(competitorProductId) },
+      select: { userId: true, title: true, url: true, price: true }
     });
 
-    if (!competitorProduct) {
+    if (!competitorProduct || competitorProduct.userId !== userId) {
       return res.status(404).json({
         success: false,
         error: 'Competitor product not found'
@@ -539,10 +582,10 @@ router.get('/price-history/:competitorProductId', async (req, res) => {
     res.json({
       success: true,
       data: {
-        competitorProduct,
+        competitorProduct: { title: competitorProduct.title, url: competitorProduct.url, price: competitorProduct.price },
         priceHistory,
         summary: {
-          currentPrice: competitorProduct?.currentPrice,
+          currentPrice: competitorProduct?.price,
           lowestPrice: Math.min(...priceHistory.map(p => p.price)),
           highestPrice: Math.max(...priceHistory.map(p => p.price)),
           averagePrice: priceHistory.length > 0 

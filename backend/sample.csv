@@ -1,0 +1,3 @@
+title,sku,brand,category,description,price,url,competitor_urls
+Sample Product Title,SKU123,Sample Brand,Electronics,Product description here,99.99,https://example.com/product,"https://competitor1.com/product,https://competitor2.com/product"
+Another Product,SKU456,Another Brand,Clothing,Another description,49.99,https://example.com/product2,"https://competitor3.com/product"

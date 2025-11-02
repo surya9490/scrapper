@@ -14,11 +14,59 @@ import { fileURLToPath } from 'url';
 import prisma from '../utils/prisma.js';
 import AIService from '../services/aiService.js';
 import competitorDiscoveryService from '../services/competitorDiscoveryService.js';
+import ScrapingService from '../services/scrapingService.js';
+import MatchingService from '../services/matchingService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+const aiService = new AIService();
+
+// Save competitor product and mapping, return saved records
+const saveCompetitorProductAndMapping = async ({ userId, userProductId, scrapedProduct, matchScoreObj, domain }) => {
+  const resolvedUrl = scrapedProduct?.sourceUrl || scrapedProduct?.url;
+  const competitorDomain = (domain || (resolvedUrl ? new URL(resolvedUrl).hostname : '')).replace(/^www\./, '');
+  const title = scrapedProduct?.title || (competitorDomain ? `Product from ${competitorDomain}` : 'Unknown Product');
+  try {
+    const competitorProduct = await prisma.competitorProduct.create({
+      data: {
+        userId,
+        title,
+        url: resolvedUrl,
+        price: scrapedProduct?.price ?? null,
+        image: scrapedProduct?.image ?? null,
+        brand: scrapedProduct?.brand ?? null,
+        category: scrapedProduct?.category ?? null,
+        threadCount: scrapedProduct?.threadCount ?? null,
+        material: scrapedProduct?.material ?? null,
+        size: scrapedProduct?.size ?? null,
+        design: scrapedProduct?.design ?? null,
+        color: scrapedProduct?.color ?? null,
+        competitorDomain,
+        competitorName: null,
+        lastScrapedAt: new Date()
+      }
+    });
+
+    const mapping = await prisma.productMapping.create({
+      data: {
+        userId,
+        userProductId,
+        competitorProductId: competitorProduct.id,
+        matchingScore: matchScoreObj?.totalScore ?? 0,
+        matchingAlgorithm: 'composite_similarity',
+        matchingDetails: JSON.stringify(matchScoreObj || {}),
+        status: 'pending'
+      }
+    });
+
+    return { competitorProduct, mapping };
+  } catch (err) {
+    console.error('Error saving competitor product/mapping:', err?.message || err);
+    throw err;
+  }
+};
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -55,7 +103,7 @@ const upload = multer({
 
 // Validate CSV headers based on monitoring type
 const validateHeaders = (headers, monitoringType = 'basic') => {
-  const requiredHeaders = ['title', 'sku'];
+  const requiredHeaders = ['title'];
   const optionalHeaders = ['brand', 'category', 'description', 'price', 'url'];
 
   if (monitoringType === 'competitor_urls') {
@@ -112,8 +160,8 @@ const parseCSVData = (filePath, monitoringType = 'basic') => {
         }
 
         // Validate required fields
-        if (!data.title || !data.sku) {
-          cleanupAndReject(new Error(`Row ${rowCount}: Missing required fields (title, sku)`));
+        if (!data.title) {
+          cleanupAndReject(new Error(`Row ${rowCount}: Missing required field (title)`));
           return;
         }
 
@@ -156,10 +204,11 @@ const parseCSVData = (filePath, monitoringType = 'basic') => {
   });
 };
 
-// Helper function to handle known competitor URLs
+// Helper: known competitor URLs with scraping + matching
 const handleKnownCompetitorUrls = async (userProducts, csvData, batchId) => {
-  // aiService may be unused here but kept for parity with your original code
-  const aiService = new AIService();
+  const scrapingService = new ScrapingService();
+  const matchingService = new MatchingService();
+  const enriched = [];
 
   for (let i = 0; i < userProducts.length; i++) {
     const userProduct = userProducts[i];
@@ -168,43 +217,85 @@ const handleKnownCompetitorUrls = async (userProducts, csvData, batchId) => {
     if (csvRow && csvRow.competitor_urls && csvRow.competitor_urls.length > 0) {
       console.log(`Processing ${csvRow.competitor_urls.length} competitor URLs for product: ${userProduct.title}`);
 
-      // Create competitor products for each URL
-      for (const url of csvRow.competitor_urls) {
-        try {
-          // Extract product info from competitor URL
-          const competitorInfo = await competitorDiscoveryService.extractProductInfo(url);
+      // Generate keywords; fallback to title
+      let keywords = [];
+      try {
+        keywords = await aiService.generateSearchKeywords(userProduct);
+      } catch (e) {
+        keywords = [userProduct.title];
+      }
 
-          if (competitorInfo) {
-            await prisma.competitorProduct.create({
-              data: {
-                title: competitorInfo.title || `Product from ${new URL(url).hostname}`,
-                price: competitorInfo.price ?? null,
-                url: url,
-                imageUrl: competitorInfo.imageUrl ?? null,
-                description: competitorInfo.description ?? null,
-                brand: competitorInfo.brand ?? null,
-                category: competitorInfo.category ?? null,
-                userProductId: userProduct.id,
-                source: 'MANUAL_URL',
-                confidence: 0.9, // High confidence for manually provided URLs
-                status: 'ACTIVE'
-              }
-            });
+      for (const providedUrl of csvRow.competitor_urls) {
+        try {
+          const domain = new URL(providedUrl).hostname.replace(/^www\./, '');
+
+          // Search site using keywords, include provided URL as candidate
+          const searchLinks = await scrapingService.searchCompetitorSite(domain, keywords, userProduct.title);
+          const candidateUrls = [providedUrl, ...searchLinks.map(r => r.url)]
+            .filter(Boolean)
+            .slice(0, 6);
+
+          // Scrape candidates immediately
+          const scraped = await scrapingService.batchScrapeProducts(candidateUrls, { useBatching: false, concurrency: 2 });
+          const scrapedResults = Array.isArray(scraped?.results) ? scraped.results : [];
+          if (scrapedResults.length === 0) {
+            console.warn(`No scraped results for ${providedUrl}`);
+            continue;
           }
+
+          // Match best competitor product
+          const matches = await matchingService.findProductMatches(userProduct.id, scrapedResults, { threshold: 0.4 });
+          const bestMatch = matches.sort((a, b) => (b.matchScore.totalScore - a.matchScore.totalScore))[0];
+
+          const chosen = bestMatch?.competitorProduct || scrapedResults[0];
+          const matchScoreObj = bestMatch?.matchScore || { totalScore: 0 };
+
+          // Save competitor product + mapping
+          const { competitorProduct, mapping } = await saveCompetitorProductAndMapping({
+            userId: userProduct.userId,
+            userProductId: userProduct.id,
+            scrapedProduct: chosen,
+            matchScoreObj,
+            domain
+          });
+
+          // Collect enriched summary for response
+          enriched.push({
+            userProductId: userProduct.id,
+            userProductTitle: userProduct.title,
+            competitorUrlProvided: providedUrl,
+            keywords,
+            selectedCompetitorProduct: {
+              id: competitorProduct.id,
+              title: competitorProduct.title,
+              url: competitorProduct.url,
+              price: competitorProduct.price,
+              image: competitorProduct.image,
+              competitorDomain: competitorProduct.competitorDomain
+            },
+            match: {
+              mappingId: mapping.id,
+              score: matchScoreObj.totalScore || 0,
+              details: matchScoreObj
+            }
+          });
         } catch (error) {
-          console.error(`Error processing competitor URL ${url}:`, error?.message || error);
-          // Continue with next URL even if one fails
+          console.error(`Error processing competitor URL ${providedUrl}:`, error?.message || error);
         }
       }
     }
   }
+
+  return enriched;
 };
 
-// Helper function to handle auto-discovery
+// Helper: auto-discovery with scraping + matching
 const handleAutoDiscovery = async (userProducts, batchId) => {
   console.log(`Starting auto-discovery for ${userProducts.length} products`);
+  const scrapingService = new ScrapingService();
+  const matchingService = new MatchingService();
+  const enriched = [];
 
-  // Process in batches to avoid overwhelming the system
   const batchSize = 5;
   for (let i = 0; i < userProducts.length; i += batchSize) {
     const batch = userProducts.slice(i, i + batchSize);
@@ -213,46 +304,81 @@ const handleAutoDiscovery = async (userProducts, batchId) => {
       try {
         console.log(`Auto-discovering competitors for: ${userProduct.title}`);
 
+        // Generate keywords; fallback to title
+        let keywords = [];
+        try {
+          keywords = await aiService.generateSearchKeywords(userProduct);
+        } catch (e) {
+          keywords = [userProduct.title];
+        }
+
         const competitors = await competitorDiscoveryService.discoverCompetitors(userProduct, {
           maxResults: 10,
           minConfidence: 0.3
         });
 
-        // Create competitor product records
-        for (const competitor of competitors) {
+        for (const comp of competitors.slice(0, 5)) {
           try {
-            await prisma.competitorProduct.create({
-              data: {
-                title: competitor.title,
-                price: competitor.price ?? null,
-                url: competitor.url,
-                imageUrl: competitor.imageUrl ?? null,
-                description: competitor.description ?? null,
-                brand: competitor.brand ?? null,
-                category: competitor.category ?? null,
-                userProductId: userProduct.id,
-                source: 'AUTO_DISCOVERY',
-                confidence: competitor.confidence ?? 0,
-                status: 'ACTIVE'
+            const domain = (comp.domain || new URL(comp.url).hostname).replace(/^www\./, '');
+            const searchLinks = await scrapingService.searchCompetitorSite(domain, keywords, userProduct.title);
+            const candidateUrls = [comp.url, ...searchLinks.map(r => r.url)]
+              .filter(Boolean)
+              .slice(0, 6);
+
+            const scraped = await scrapingService.batchScrapeProducts(candidateUrls, { useBatching: false, concurrency: 2 });
+            const scrapedResults = Array.isArray(scraped?.results) ? scraped.results : [];
+            if (scrapedResults.length === 0) continue;
+
+            const matches = await matchingService.findProductMatches(userProduct.id, scrapedResults, { threshold: 0.4 });
+            const bestMatch = matches.sort((a, b) => (b.matchScore.totalScore - a.matchScore.totalScore))[0];
+            const chosen = bestMatch?.competitorProduct || scrapedResults[0];
+            const matchScoreObj = bestMatch?.matchScore || { totalScore: 0 };
+
+            const { competitorProduct, mapping } = await saveCompetitorProductAndMapping({
+              userId: userProduct.userId,
+              userProductId: userProduct.id,
+              scrapedProduct: chosen,
+              matchScoreObj,
+              domain
+            });
+
+            enriched.push({
+              userProductId: userProduct.id,
+              userProductTitle: userProduct.title,
+              discoveredFrom: comp.source || comp.searchEngine || 'search',
+              competitorCandidateUrl: comp.url,
+              keywords,
+              selectedCompetitorProduct: {
+                id: competitorProduct.id,
+                title: competitorProduct.title,
+                url: competitorProduct.url,
+                price: competitorProduct.price,
+                image: competitorProduct.image,
+                competitorDomain: competitorProduct.competitorDomain
+              },
+              match: {
+                mappingId: mapping.id,
+                score: matchScoreObj.totalScore || 0,
+                details: matchScoreObj
               }
             });
           } catch (err) {
-            console.error('Error creating competitorProduct record:', err?.message || err);
+            console.error('Auto-discovery candidate processing error:', err?.message || err);
           }
         }
 
-        console.log(`Found ${competitors.length} competitors for ${userProduct.title}`);
+        console.log(`Processed ${Math.min(5, competitors.length)} competitors for ${userProduct.title}`);
       } catch (error) {
         console.error(`Error in auto-discovery for product ${userProduct.title}:`, error?.message || error);
-        // Continue with next product even if one fails
       }
     }));
 
-    // Add delay between batches to be respectful to search engines
     if (i + batchSize < userProducts.length) {
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
+
+  return enriched;
 };
 
 // POST /api/upload - Upload CSV file
@@ -313,11 +439,12 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
         }
       }
 
-      // Handle competitor monitoring based on type
+      // Handle competitor monitoring based on type; collect enriched results
+      let enrichedResults = [];
       if (monitoringType === 'competitor_urls') {
-        await handleKnownCompetitorUrls(userProducts, csvData, uploadBatch.id);
+        enrichedResults = await handleKnownCompetitorUrls(userProducts, csvData, uploadBatch.id);
       } else if (monitoringType === 'auto_discovery') {
-        await handleAutoDiscovery(userProducts, uploadBatch.id);
+        enrichedResults = await handleAutoDiscovery(userProducts, uploadBatch.id);
       }
 
       // Update batch status with counts
@@ -353,6 +480,7 @@ router.post('/', upload.single('csvFile'), async (req, res) => {
           products: userProducts,
           monitoringType,
           competitorMonitoringEnabled: monitoringType !== 'basic',
+          enrichedResults,
           counts: {
             processed: successCount + errorCount,
             success: successCount,

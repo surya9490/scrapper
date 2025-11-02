@@ -211,6 +211,56 @@ class ScrapingService {
 
   // Extract product data using multiple selectors
   extractProductData($, url) {
+    const hostname = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return null; } })();
+
+    // Domain-specific extractors
+    const domainExtractors = {
+      'ikea.com': ($, url) => {
+        // IKEA PDP structure
+        const titleSel = [
+          '.pip-header-section__title',
+          'h1.pip-header-section__title',
+          '[data-product-name]'
+        ];
+        const priceSel = [
+          '.pip-price__value',
+          '[itemprop="price"]',
+          '[data-price]'
+        ];
+        const imageSel = [
+          '.pip-media-grid__image img',
+          '.pip-media-grid__gallery img',
+          'meta[property="og:image"]'
+        ];
+        const descSel = [
+          '.pip-product-details__container',
+          '.pip-product__description',
+          '[data-product-description]'
+        ];
+
+        const title = extractText(titleSel) || $('meta[property="og:title"]').attr('content') || null;
+        const priceText = extractText(priceSel) || $('meta[property="product:price:amount"]').attr('content') || $('[itemprop="price"]').attr('content');
+        const price = priceText ? this.parsePrice(priceText) : null;
+        let imageUrl = extractAttribute(imageSel, 'src') || $('meta[property="og:image"]').attr('content');
+        if (imageUrl && !imageUrl.startsWith('http')) {
+          const baseUrl = new URL(url).origin;
+          imageUrl = new URL(imageUrl, baseUrl).href;
+        }
+
+        const description = extractText(descSel) || $('meta[name="description"]').attr('content') || null;
+
+        return {
+          title,
+          price,
+          image: imageUrl,
+          description,
+          availability: this.checkAvailability($),
+          rating: this.extractRating($),
+          reviewCount: this.extractReviewCount($)
+        };
+      }
+    };
+
     const selectors = {
       title: [
         'h1[data-testid="product-title"]',
@@ -233,7 +283,14 @@ class ScrapingService {
         '.price-box .price',
         '[class*="price"][class*="current"]',
         '.price',
-        '[data-cy="price"]'
+        '[data-cy="price"]',
+        // common structured/meta price hints
+        '[itemprop="price"]',
+        'meta[property="product:price:amount"]',
+        "meta[itemprop='price']",
+        // IKEA-specific
+        '.pip-price__value',
+        '[data-price]'
       ],
       image: [
         '[data-testid="product-image"] img',
@@ -242,7 +299,8 @@ class ScrapingService {
         '.main-image img',
         '.hero-image img',
         '.product-gallery img:first',
-        'img[class*="product"]'
+        'img[class*="product"]',
+        'meta[property="og:image"]'
       ],
       description: [
         '[data-testid="product-description"]',
@@ -275,21 +333,33 @@ class ScrapingService {
     };
 
     // Extract price and clean it
-    const priceText = extractText(selectors.price);
+    const priceText = extractText(selectors.price) || $('meta[property="product:price:amount"]').attr('content') || $('[itemprop="price"]').attr('content');
     const price = priceText ? this.parsePrice(priceText) : null;
 
     // Extract image URL
-    let imageUrl = extractAttribute(selectors.image);
+    let imageUrl = extractAttribute(selectors.image) || $('meta[property="og:image"]').attr('content');
     if (imageUrl && !imageUrl.startsWith('http')) {
       const baseUrl = new URL(url).origin;
       imageUrl = new URL(imageUrl, baseUrl).href;
     }
 
+    // Use domain-specific extractor when available
+    if (hostname && domainExtractors[hostname]) {
+      try {
+        const domainResult = domainExtractors[hostname]($, url);
+        if (domainResult && (domainResult.title || domainResult.price || domainResult.image)) {
+          return domainResult;
+        }
+      } catch (e) {
+        // fall through to generic
+      }
+    }
+
     return {
-      title: extractText(selectors.title),
+      title: extractText(selectors.title) || $('meta[property="og:title"]').attr('content') || null,
       price: price,
       image: imageUrl,
-      description: extractText(selectors.description),
+      description: extractText(selectors.description) || $('meta[name="description"]').attr('content') || null,
       availability: this.checkAvailability($),
       rating: this.extractRating($),
       reviewCount: this.extractReviewCount($)
@@ -380,13 +450,16 @@ class ScrapingService {
 
 
   // Search for products on competitor sites
-  async searchCompetitorSite(urlsOrDomain, keywordOrKeywords) {
+  async searchCompetitorSite(urlsOrDomain, keywordOrKeywords,title) {
     const isArrayInput = Array.isArray(urlsOrDomain);
     const normalizedInput = !isArrayInput && typeof urlsOrDomain === 'string'
       ? (urlsOrDomain.startsWith('http') ? urlsOrDomain : `https://${urlsOrDomain}`)
       : null;
     const maxResults = 20;
-    const keyword = Array.isArray(keywordOrKeywords) ? (keywordOrKeywords[0] || '') : (keywordOrKeywords || '');
+    let keyword = Array.isArray(keywordOrKeywords) ? (keywordOrKeywords[0] || '') : (keywordOrKeywords || '');
+    if (!keyword && title) {
+      keyword = title;
+    }
     const normalizeUrl = (u) => (u && u.startsWith('http')) ? u : (u ? `https://${u}` : u);
     const browser = await this.initBrowser();
     let context = null;

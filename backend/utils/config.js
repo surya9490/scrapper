@@ -19,7 +19,12 @@ const OPTIONAL_ENV_VARS = {
   SCRAPER_MAX_RETRIES: '3',
   RATE_LIMIT_WINDOW: '900000', // 15 minutes
   RATE_LIMIT_MAX: '100',
-  HELMET_CSP_ENABLED: 'true'
+  HELMET_CSP_ENABLED: 'true',
+  // Discovery-related optional flags
+  DISCOVERY_USE_BING_ONLY: 'true',
+  DISCOVERY_USE_PROXY: 'false',
+  DISCOVERY_FALLBACK_DOMAINS: '[]',
+  DISCOVERY_SEEDED_DOMAINS_JSON: '{}'
 };
 
 /**
@@ -141,7 +146,13 @@ export function getConfig() {
     // Feature flags
     isDevelopment: process.env.NODE_ENV === 'development',
     isProduction: process.env.NODE_ENV === 'production',
-    isTest: process.env.NODE_ENV === 'test'
+    isTest: process.env.NODE_ENV === 'test',
+
+    // Competitor discovery configuration
+    discoveryUseBingOnly: process.env.DISCOVERY_USE_BING_ONLY === 'true',
+    discoveryUseProxy: process.env.DISCOVERY_USE_PROXY === 'true',
+    discoveryFallbackDomains: safeParseJson(process.env.DISCOVERY_FALLBACK_DOMAINS, []),
+    discoverySeededDomains: safeParseJson(process.env.DISCOVERY_SEEDED_DOMAINS_JSON, {})
   };
 }
 
@@ -182,3 +193,15 @@ export default {
   getConfig,
   logConfigurationStatus
 };
+
+// Helper to safely parse JSON env values
+function safeParseJson(str, fallback) {
+  try {
+    if (!str) return fallback;
+    const parsed = JSON.parse(str);
+    return parsed;
+  } catch (e) {
+    logger.warn('Failed to parse JSON env value', { value: str?.slice?.(0, 120), error: e.message });
+    return fallback;
+  }
+}

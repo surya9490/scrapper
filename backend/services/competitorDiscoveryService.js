@@ -2,11 +2,17 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import AIService from './aiService.js';
 import { URL } from 'url';
+import ProxyRotation from '../utils/proxyRotation.js';
+import ScrapingService from './scrapingService.js';
+import { getConfig } from '../utils/config.js';
 
 const aiService = new AIService();
 
 class CompetitorDiscoveryService {
   constructor() {
+    this.config = getConfig();
+    this.proxyRotation = new ProxyRotation();
+    this.scrapingService = new ScrapingService();
     this.searchEngines = {
       google: {
         url: 'https://www.google.com/search',
@@ -60,7 +66,7 @@ class CompetitorDiscoveryService {
   async discoverCompetitors(userProduct, options = {}) {
     const {
       maxResults = 20,
-      searchEngines = ['google'],
+      searchEngines = (this.config.discoveryUseBingOnly ? ['bing'] : ['bing', 'google']),
       includeKnownDomains = true,
       excludeDomains = []
     } = options;
@@ -79,7 +85,7 @@ class CompetitorDiscoveryService {
       for (const engine of searchEngines) {
         for (const query of searchQueries.slice(0, 3)) { // Limit queries to avoid rate limiting
           try {
-            const results = await this.searchProducts(query, engine, maxResults / searchQueries.length);
+            const results = await this.searchProducts(query, engine, Math.ceil(maxResults / Math.max(1, searchQueries.length)), { useProxy: this.config.discoveryUseProxy });
             
             for (const result of results) {
               if (!seenUrls.has(result.url) && this.isValidCompetitorUrl(result.url, excludeDomains)) {
@@ -101,11 +107,23 @@ class CompetitorDiscoveryService {
 
       // Score and filter results
       const scoredResults = await this.scoreCompetitorCandidates(userProduct, allResults);
-      
-      // Return top results
-      return scoredResults
+      let finalResults = scoredResults
         .sort((a, b) => b.relevanceScore - a.relevanceScore)
         .slice(0, maxResults);
+
+      // Fallback: if blocked or zero results, seed known domains
+      if (finalResults.length === 0) {
+        const seeded = await this.seedFromKnownDomains(userProduct, searchQueries, maxResults);
+        if (seeded && seeded.length) {
+          const seededScored = await this.scoreCompetitorCandidates(userProduct, seeded);
+          finalResults = seededScored
+            .sort((a, b) => b.relevanceScore - a.relevanceScore)
+            .slice(0, maxResults);
+        }
+      }
+
+      // Return top results
+      return finalResults;
 
     } catch (error) {
       console.error('Error discovering competitors:', error.message);
@@ -116,7 +134,7 @@ class CompetitorDiscoveryService {
   /**
    * Search for products using a search engine
    */
-  async searchProducts(query, engineName = 'google', maxResults = 10) {
+  async searchProducts(query, engineName = 'google', maxResults = 10, opts = {}) {
     try {
       const engine = this.searchEngines[engineName];
       if (!engine) {
@@ -132,7 +150,19 @@ class CompetitorDiscoveryService {
 
       console.log(`Searching ${engineName} for: "${query}"`);
       
-      const response = await axios.get(searchUrl.toString(), this.requestConfig);
+      const axiosConfig = { ...this.requestConfig };
+      if (opts.useProxy) {
+        const proxy = await this.proxyRotation.getNextProxy();
+        if (proxy) {
+          axiosConfig.proxy = {
+            host: proxy.host,
+            port: proxy.port,
+            auth: proxy.username ? { username: proxy.username, password: proxy.password || '' } : undefined
+          };
+        }
+      }
+
+      const response = await axios.get(searchUrl.toString(), axiosConfig);
       const $ = cheerio.load(response.data);
 
       const results = [];
@@ -177,6 +207,48 @@ class CompetitorDiscoveryService {
 
     } catch (error) {
       console.error(`Error searching ${engineName}:`, error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Fallback seeding from known competitor domains when search engines block or return nothing
+   */
+  async seedFromKnownDomains(userProduct, queries, maxResults = 10) {
+    try {
+      const title = userProduct?.title || '';
+      const brand = (userProduct?.brand || '').trim();
+      const category = (userProduct?.category || '').trim();
+      const seededMap = this.config.discoverySeededDomains || {};
+      const seeded = [
+        ...(Array.isArray(this.config.discoveryFallbackDomains) ? this.config.discoveryFallbackDomains : []),
+        ...(this.commonEcommerceDomains || [])
+      ];
+
+      // Merge brand/category specific seeds
+      if (brand && seededMap[brand]) seeded.push(...seededMap[brand]);
+      if (category && seededMap[category]) seeded.push(...seededMap[category]);
+
+      const domains = Array.from(new Set(seeded)).filter(Boolean);
+      const keywords = (queries && queries.length ? queries : [title]).slice(0, 3);
+      const collected = [];
+
+      for (const domain of domains) {
+        if (collected.length >= maxResults) break;
+        try {
+          const found = await this.scrapingService.searchCompetitorSite(domain, keywords, title);
+          if (found && found.length) {
+            found.slice(0, Math.max(1, maxResults - collected.length)).forEach(item => {
+              collected.push({ title: item.title || '', url: item.url, snippet: '', source: 'seed' });
+            });
+          }
+        } catch (e) {
+          // continue
+        }
+      }
+
+      return collected;
+    } catch (e) {
       return [];
     }
   }
